@@ -2760,14 +2760,14 @@ class VerboseASPListener extends ASPListener {
     }
 
     collectVariablesFromGeneralTerm(generalTerm) {
-        if(!generalTerm || generalTerm.getText() == '') return {allVars: new Set(), groundableVars: new Set(), skip: false, hasNonVarOrNonInt: false};
+        if(!generalTerm || generalTerm.getText() == '') return {allVars: new Set(), groundableVars: new Set(), skip: false, hasNonAritmethicValue: false};
 
         if(generalTerm.interval()) {
             const terms = generalTerm.interval().term();
             let allVars = [];
             let groundableVars = new Set();
             let skip = false;
-            let hasNonVarOrNonInt = false;
+            let hasNonAritmethicValue = false;
             let hasNonGroundableOperator = false;
 
             terms.forEach(term => {
@@ -2775,22 +2775,22 @@ class VerboseASPListener extends ASPListener {
                 result.allVars.forEach(v => allVars.push(v));
                 result.groundableVars.forEach(v => groundableVars.add(v));
                 if(result.skip) skip = true;
-                if(result.hasNonVarOrNonInt) hasNonVarOrNonInt = true;
+                if(result.hasNonAritmethicValue) hasNonAritmethicValue = true;
                 if(result.hasNonGroundableOperator) hasNonGroundableOperator = true;
             });
 
-            if(hasNonVarOrNonInt) {
+            if(hasNonAritmethicValue) {
                 // If atleast one arithmetic term has something other than vars and ints, then we do not need to consider any variables from these terms
-                return {allVars: new Set(), groundableVars: new Set(), skip: true, hasNonVarOrNonInt: true, hasNonGroundableOperator: false};
+                return {allVars: new Set(), groundableVars: new Set(), skip: true, hasNonAritmethicValue: true, hasNonGroundableOperator: false};
             } else {
                 if(hasNonGroundableOperator) {
-                    return {allVars: new Set(allVars), groundableVars: new Set(), skip: skip, hasNonVarOrNonInt: false, hasNonGroundableOperator: true};
+                    return {allVars: new Set(allVars), groundableVars: new Set(), skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: true};
                 }
 
                 if(allVars.length == 1) {
-                    return {allVars: new Set(allVars), groundableVars: new Set(allVars), skip: skip, hasNonVarOrNonInt: false, hasNonGroundableOperator: false};
+                    return {allVars: new Set(allVars), groundableVars: new Set(allVars), skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: false};
                 } else {
-                    return {allVars: new Set(allVars), groundableVars: groundableVars, skip: skip, hasNonVarOrNonInt: false, hasNonGroundableOperator: false};
+                    return {allVars: new Set(allVars), groundableVars: groundableVars, skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: false};
                 }
             }
                 
