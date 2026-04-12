@@ -2767,7 +2767,7 @@ class VerboseASPListener extends ASPListener {
             let allVars = [];
             let groundableVars = new Set();
             let skip = false;
-            let hasNonAritmethicValue = false;
+            let hasNonArithmeticValue = false;
             let hasNonGroundableOperator = false;
 
             terms.forEach(term => {
@@ -2775,22 +2775,22 @@ class VerboseASPListener extends ASPListener {
                 result.allVars.forEach(v => allVars.push(v));
                 result.groundableVars.forEach(v => groundableVars.add(v));
                 if(result.skip) skip = true;
-                if(result.hasNonAritmethicValue) hasNonAritmethicValue = true;
+                if(result.hasNonArithmeticValue) hasNonArithmeticValue = true;
                 if(result.hasNonGroundableOperator) hasNonGroundableOperator = true;
             });
 
-            if(hasNonAritmethicValue) {
+            if(hasNonArithmeticValue) {
                 // If atleast one arithmetic term has something other than vars and ints, then we do not need to consider any variables from these terms
-                return {allVars: new Set(), groundableVars: new Set(), skip: true, hasNonAritmethicValue: true, hasNonGroundableOperator: false};
+                return {allVars: new Set(), groundableVars: new Set(), skip: true, hasNonArithmeticValue: true, hasNonGroundableOperator: false};
             } else {
                 if(hasNonGroundableOperator) {
-                    return {allVars: new Set(allVars), groundableVars: new Set(), skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: true};
+                    return {allVars: new Set(allVars), groundableVars: new Set(), skip: skip, hasNonArithmeticValue: false, hasNonGroundableOperator: true};
                 }
 
                 if(allVars.length == 1) {
-                    return {allVars: new Set(allVars), groundableVars: new Set(allVars), skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: false};
+                    return {allVars: new Set(allVars), groundableVars: new Set(allVars), skip: skip, hasNonArithmeticValue: false, hasNonGroundableOperator: false};
                 } else {
-                    return {allVars: new Set(allVars), groundableVars: groundableVars, skip: skip, hasNonAritmethicValue: false, hasNonGroundableOperator: false};
+                    return {allVars: new Set(allVars), groundableVars: groundableVars, skip: skip, hasNonArithmeticValue: false, hasNonGroundableOperator: false};
                 }
             }
                 
@@ -2937,7 +2937,7 @@ class VerboseASPListener extends ASPListener {
             result.groundableVars.forEach(v => groundableVars.add(v));
 
             hasNonGroundableOperator = result.hasNonGroundableOperator;
-            isArithmeticValue = !result.hasArithmeticValue;
+            isArithmeticValue = !result.hasNonArithmeticValue;
             skip = result.skip;
         }
 
