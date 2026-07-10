@@ -94,3 +94,25 @@ f(g(X,Y)).                 % X,Y unsafe
 { q(X) : not y(X)}.  % X unsafe
 { q(X) : -y(X)}.     % Safe
 { q(X) : y(X)}.     % Safe
+
+% ============================
+% CONDITIONALS
+% ============================
+
+p(X) : person(X). % SAFE
+p(X,Y) : person(X). % UNSAFE: Y
+p : q(X). % SAFE
+p(X) : not q(X). % UNSAFE: X
+p(X) : not q(X), r(X). % SAFE
+p(X,Y) : q(X), r(Y). % SAFE
+p(X) : X > 0. % UNSAFE: X
+p(X) : X = 1+1. % SAFE
+p(X) : q(X+1). % SAFE
+p(X) : q(X) ; s(Y) : r(Y). % SAFE
+p(_) : q(a). % UNSAFE
+p(X) : q(X;X). % SAFE
+p : q(a). % SAFE
+avail(X) : day(X). % SAFE
+p(X) : q(X+X). % SAFE
+p(X) : q(0*X). % UNSAFE: X
+p(X) : q(2*(X+1)). % SAFE

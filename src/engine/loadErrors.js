@@ -299,7 +299,6 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 		}		
 	}
 
-
 	let symbol;
 
 	if (detectOS() == WINDOWS) {

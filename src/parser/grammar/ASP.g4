@@ -2,10 +2,24 @@ grammar ASP;
 
 program: (statement | line_comment | block_comment | unclosed_comment)* EOF;
 
-statement: constant | fact | choice_rule | definite_rule | constraint | optimization | weak_constraint | show;
+statement: defined | external | heuristic | program_statement | constant | fact | choice_rule | definite_rule | constraint | optimization | weak_constraint | show;
+
+defined:
+       '#defined' CONSTANT '/' NUMBER DOT;
+
+external: 
+       '#external' classical_atom (':' body)? DOT;
+
+heuristic: 
+       '#heuristic' classical_atom (':' body)? DOT '[' termOrInterval ('@' termOrInterval)? ',' termOrInterval EOWC;
+
+program_statement: 
+       '#program' program_name ( '(' (CONSTANT (',' CONSTANT)*)? ')' )? DOT;
+
+program_name: CONSTANT;
 
 constant: 
-    '#const' CONSTANT '=' (constant_term | interval) DOT;
+       '#const' CONSTANT '=' (constant_term | interval) DOT;
 
 // Types of Rules: Facts, Choice Rules, Definite Rules, Integrity Constraints
 fact: 
@@ -14,10 +28,10 @@ fact:
 choice_rule:
        choice ':-' body DOT;
 
-choice: (generalTerm | comparatorTerm1 )? '{' (choice_element (';' choice_element)*)? '}' (comparatorTerm2 | generalTerm)?;
+choice: (termOrInterval | comparatorTerm1 )? '{' (choice_element (';' choice_element)*)? '}' (comparatorTerm2 | termOrInterval)?;
 
-comparatorTerm1: generalTerm (COMPARATOR | EQ | EQEQ);  // Used to be able to differentiate between both comparators used in choices. Useful for unsafe variable detection
-comparatorTerm2: (COMPARATOR | EQ | EQEQ) generalTerm;
+comparatorTerm1: termOrInterval (COMPARATOR | EQ | EQEQ);  // Used to be able to differentiate between both comparators used in choices. Useful for unsafe variable detection
+comparatorTerm2: (COMPARATOR | EQ | EQEQ) termOrInterval;
 
 choice_element: choiceHead_atoms (':' (choiceBody_atoms (',' choiceBody_atoms)* )? )?;
 
@@ -35,9 +49,9 @@ head:
 body: 
        (body_atoms ((';' | ',') body_atoms)*)?;
 
-head_atoms: literal | NOT? NOT? builtIn_atom;
+head_atoms: conditional | literal | NOT? NOT? builtIn_atom;
 
-body_atoms: literal | NOT? NOT? builtIn_atom | NOT? NOT? aggregate_atom_body | NOT? NOT? choice;
+body_atoms: conditional | literal | NOT? NOT? builtIn_atom | NOT? NOT? aggregate_atom_body | NOT? NOT? choice;
 
 // Optimization statements
 optimization: 
@@ -46,7 +60,7 @@ optimization:
 
 // Weak Constraint
 weak_constraint: 
-       ':~' body '.' '[' (((generalTerm '@' generalTerm) (',' generalTerm)*) | (generalTerm (',' generalTerm)*)) EOWC;
+       ':~' body '.' '[' (((termOrInterval '@' termOrInterval) (',' termOrInterval)*) | (termOrInterval (',' termOrInterval)*)) EOWC;
 
 show:
        (show_atoms DOT)
@@ -54,7 +68,7 @@ show:
        | (show_nothing DOT);
 
 show_atoms: '#show' CONSTANT '/' NUMBER;
-show_terms: '#show' generalTerm (':' body)?;
+show_terms: '#show' termOrInterval (':' body)?;
 show_nothing: '#show';
 
 // Comments (line, block and unclosed)
@@ -62,36 +76,42 @@ block_comment: BLOCK_COMMENT;
 unclosed_comment: UNCLOSED_COMMENT;
 line_comment: LINE_COMMENT;
 
+conditional: head_condition_atom ':' body_condition_atom (',' body_condition_atom)*;
+head_condition_atom: literal | (NOT? NOT? builtIn_atom);  // Used exclusively to separate the atoms before and after the colon. Useful for stratification errors
+body_condition_atom: literal | (NOT? NOT? builtIn_atom);
+
 literal: NOT? NOT? classical_atom;
 classical_atom: CLASSICAL_NEGATION? atom;
-atom: CONSTANT ('(' (generalTerm (',' generalTerm)*)? (';' (generalTerm (',' generalTerm)*)? )* ')')?;
+atom: CONSTANT ('(' (generalTerm (',' generalTerm)*)? ')')?;
 
-builtIn_atom: generalTerm (COMPARATOR | EQ | EQEQ) generalTerm;
+builtIn_atom: termOrInterval (COMPARATOR | EQ | EQEQ) termOrInterval;
 
 aggregate_atom_head:
-       AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}' (COMPARATOR | EQ | EQEQ) generalTerm
+       AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}' (COMPARATOR | EQ | EQEQ) termOrInterval
        | AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}'
-       | generalTerm (COMPARATOR | EQ | EQEQ) AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}'
+       | termOrInterval (COMPARATOR | EQ | EQEQ) AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}'
        | AGGREGATE_FUNCTION '{' (aggregate_element_head (';' aggregate_element_head)*)? '}';
 
 
-aggregate_element_head: generalTerm (',' generalTerm)* ':' aggregate_literal;   // Separating aggregate elements because clingo accepts slightly different aggregates depending if it's placed on head or body
+aggregate_element_head: generalTerm (',' generalTerm)* ':' (aggregate_literal | conditional);   // Separating aggregate elements because clingo accepts slightly different aggregates depending if it's placed on head or body
 
 aggregate_atom_body: 
-       AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}' (COMPARATOR | EQ | EQEQ) generalTerm
+       AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}' (COMPARATOR | EQ | EQEQ) termOrInterval
        | AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}'
-       | generalTerm (COMPARATOR | EQ | EQEQ) AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}'
+       | termOrInterval (COMPARATOR | EQ | EQEQ) AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}'
        | AGGREGATE_FUNCTION '{' (aggregate_element_body (';' aggregate_element_body)*)? '}' ;
 
 
 aggregate_element_body: (generalTerm (',' generalTerm)*)? (':' (aggregate_literal (',' aggregate_literal)*)?)?;
 
-aggregate_element_optimization: ( ((generalTerm '@' generalTerm) (',' generalTerm)*) | (generalTerm (',' generalTerm)*) ) (':' (aggregate_literal (',' aggregate_literal)*)?)?;
+aggregate_element_optimization: ( ((termOrInterval '@' termOrInterval) (',' termOrInterval)*) | (termOrInterval (',' termOrInterval)*) ) (':' (aggregate_literal (',' aggregate_literal)*)?)?;
 
 aggregate_literal: literal | NOT? NOT? builtIn_atom;
 
 // Terms
-generalTerm: term | interval;
+generalTerm: termOrInterval (';' termOrInterval)*;
+
+termOrInterval: term | interval;
 
 term: ('|' additiveTerm '|') | additiveTerm;
 
@@ -103,7 +123,7 @@ powerTerm: unaryTerm (EXPONENTIATION unaryTerm)*;
 
 unaryTerm: simpleTerm | functionTerm | tuple | '(' generalTerm ')';
 simpleTerm: integer | CONSTANT | STRING | VARIABLE | UNDERSCORE | SUP | INF;
-functionTerm: CONSTANT ('(' (generalTerm (',' generalTerm)*)? (';' (generalTerm (',' generalTerm)*)? )* ')')?;
+functionTerm: CONSTANT ('(' (generalTerm (',' generalTerm)*)? ')')?;
 tuple: '(' generalTerm ',' generalTerm (',' generalTerm)* ')';
 
 // Constant rules utilize slightly different terms
@@ -130,7 +150,7 @@ UNCLOSED_COMMENT : '%*' ~[*]* ('*' ~[%])* EOF;
 LINE_COMMENT: '%' ~[*\r\n] ~[\r\n]* [\r\n]?;
 DOTDOT: '..';
 DOT: '.';
-EOWC: ']';           // End of weak constraint
+EOWC: ']';           // End of weak constraint and heuristic
 CONSTANT: (UNDERSCORE)*[a-z][a-zA-Z0-9_]*;
 VARIABLE: (UNDERSCORE)*[A-Z][a-zA-Z0-9_]*; 
 UNDERSCORE: '_';
@@ -153,4 +173,5 @@ AND: '&';
 EXPONENTIATION: '**';
 EXTERNAL_FUNCTION: '@' [a-zA-Z_][a-zA-Z_0-9]* '(' .*? ')' -> skip;
 SCRIPT: '#script' .*? '#end.' -> skip;
+// PROGRAM_STATEMENT: '#program' ~[.]* '.' -> skip;
 WS: [ \t\r\n]+ -> skip;

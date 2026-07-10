@@ -98,6 +98,19 @@
 
 { q(X) : not y(X) } :- not q(X), not q(Y).  % X, Y unsafe
 
+% Conditionals
+
+{p(X)} :- q(Y) : r(Y). % UNSAFE: X
+{p(X)} :- q(X) : r(X). % UNSAFE: X
+{p(X)} :- q(X), r(Y) : s(Y). % SAFE
+{p(X,Y)} :- a(X) : b(X); c(Y) : d(Y). % UNSAFE: X, Y
+{p(X)} :- s(X), a(Y) : b(Y); c(Z) : d(Z). % SAFE
+{p} :- q(Y) : r(Y). % SAFE
+{p(X); w(X)} :- q(X). % SAFE
+{p(X); w(X)} :- q(Y) : r(Y). % UNSAFE: X
+{p(X)} :- not q(Y) : r(Y), s(X). % UNSAFE: X
+{p(X)} :- q(Y) : r(Y,X). % UNSAFE: X
+{p(X)} :- s(X), q(Y) : r(Y,X). % SAFE
 
 
 

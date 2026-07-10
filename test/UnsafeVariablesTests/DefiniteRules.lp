@@ -43,3 +43,21 @@ not q(X) :- r(X).   % Safe
 not q(X); q(X) :- not r(X).   % X unsafe
 
 q(X), q(X) :- not r(X).   % X unsafe
+
+% Conditionals
+
+on(X) : day(X) :- meet. % SAFE
+on(X,Y) : day(X) :- meet. % UNSAFE: Y
+on(X) : day(X) :- day(Y). % SAFE
+on(X) : day(X) :- not meet. % SAFE
+meet :- available(X) : person(X). % SAFE
+p(X) :- available(Y) : person(Y). % UNSAFE: X
+p(X) :- available(X) : person(X). % UNSAFE: X
+p(X) :- q(X), available(Y) : person(Y). % SAFE
+p(X) :- available(Y) : person(Y); q(X). % SAFE
+p(X) :- available(Y) : person(Y), q(X). % UNSAFE: X
+on(X) : day(X) :- available(Y) : person(Y). % SAFE
+on(X,Y) : day(X) :- available(Y) : person(Y). % UNSAFE: Y
+on(X) : day(Y) :- meet(Y). % UNSAFE: X
+on(X) : day(X) :- q(X). % SAFE
+on(X) : day(Y) :- range(Y). % UNSAFE: X

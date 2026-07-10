@@ -23,6 +23,51 @@ export default class ASPListener extends antlr4.tree.ParseTreeListener {
 	}
 
 
+	// Enter a parse tree produced by ASPParser#defined.
+	enterDefined(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#defined.
+	exitDefined(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#external.
+	enterExternal(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#external.
+	exitExternal(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#heuristic.
+	enterHeuristic(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#heuristic.
+	exitHeuristic(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#program_statement.
+	enterProgram_statement(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#program_statement.
+	exitProgram_statement(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#program_name.
+	enterProgram_name(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#program_name.
+	exitProgram_name(ctx) {
+	}
+
+
 	// Enter a parse tree produced by ASPParser#constant.
 	enterConstant(ctx) {
 	}
@@ -239,6 +284,33 @@ export default class ASPListener extends antlr4.tree.ParseTreeListener {
 	}
 
 
+	// Enter a parse tree produced by ASPParser#conditional.
+	enterConditional(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#conditional.
+	exitConditional(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#head_condition_atom.
+	enterHead_condition_atom(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#head_condition_atom.
+	exitHead_condition_atom(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#body_condition_atom.
+	enterBody_condition_atom(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#body_condition_atom.
+	exitBody_condition_atom(ctx) {
+	}
+
+
 	// Enter a parse tree produced by ASPParser#literal.
 	enterLiteral(ctx) {
 	}
@@ -335,6 +407,15 @@ export default class ASPListener extends antlr4.tree.ParseTreeListener {
 
 	// Exit a parse tree produced by ASPParser#generalTerm.
 	exitGeneralTerm(ctx) {
+	}
+
+
+	// Enter a parse tree produced by ASPParser#termOrInterval.
+	enterTermOrInterval(ctx) {
+	}
+
+	// Exit a parse tree produced by ASPParser#termOrInterval.
+	exitTermOrInterval(ctx) {
 	}
 
 

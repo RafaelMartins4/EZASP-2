@@ -159,7 +159,6 @@ class VerboseASPListener extends ASPListener {
         this.constructTypes = [];
         this.hasGenerator = false;
         this.hasUnclosedComment = false;
-        this.statementsByLine = new Map();
         this.definedPredicates = new Map();
         this.usedPredicates = new Map();
         this.lineRanges = new Map();
@@ -186,6 +185,609 @@ class VerboseASPListener extends ASPListener {
         });
 
         this.anonCounter = 0;
+    }
+
+    enterDefined(ctx) {
+        if (!ctx.start || !ctx.stop) return;
+
+        const predicateName = ctx.CONSTANT().getText();
+        const predicateArity = ctx.NUMBER().getText();
+
+        const predicateKey = `${predicateName}/${predicateArity}`;
+
+        const lineStart = ctx.start.line;
+        const lineEnd = ctx.stop.line;
+        const indexStart = ctx.start.column;
+        let indexEnd = ctx.stop.column;
+
+        if(indexEnd == indexStart) {
+            indexEnd += predicateName.length;
+        }
+
+        if (!this.definedPredicates.has(predicateKey)) {
+            this.definedPredicates.set(predicateKey, []);
+        }
+        this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+    }
+
+    enterExternal(ctx) {
+        if (!ctx.start || !ctx.stop) return;
+
+        const atom = ctx.classical_atom().atom();
+        if (!atom || !atom.start || !atom.stop) return;
+        const predicateName = atom.CONSTANT().getText();
+        const atomText = atom.getText();
+        let hasArgs = false;
+        let argsText;
+        if(atomText.indexOf('(') != -1) {
+            hasArgs = true;
+            argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+        }
+        const generalTerms = atom.generalTerm();
+
+        const lineStart = atom.start.line;
+        const lineEnd = atom.stop.line;
+        const indexStart = atom.start.column;
+        let indexEnd = atom.stop.column;
+
+        if(indexEnd == indexStart) {
+            indexEnd += predicateName.length;
+        }
+
+        if(hasArgs) {
+            const arities = new Set();
+            let nest = 0;
+            let arity = 0;
+            let hasToken = false;
+            let lastNonWS = '';
+
+            for (let i = 0; i < argsText.length; i++) {
+                const ch = argsText[i];
+                if (!/\s/.test(ch)) lastNonWS = ch;
+
+                if (ch === '(') {
+                    nest++;
+                } else if (ch === ')') {
+                    nest--;
+                } else if (ch === ',' && nest === 0) {
+                    arity++;
+                    hasToken = false;
+                } else if (ch === ';' && nest === 0) {
+                    arities.add(hasToken ? arity + 1 : arity);
+                    hasToken = false;
+                    arity = 0;
+                } else if (ch.trim() !== '') {
+                    hasToken = true;
+                }
+            }
+
+            if (hasToken || arity > 0) {
+                arities.add(arity + (hasToken ? 1 : 0));
+            } else if (lastNonWS === ';') {
+                arities.add(0);
+            }
+
+            if(arities.size == 0) {
+                const predicateKey = `${predicateName}/0`;
+                if (!this.definedPredicates.has(predicateKey)) {
+                    this.definedPredicates.set(predicateKey, []);
+                }
+                this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+            } else {
+                arities.forEach(arity => {
+                    const predicateKey = `${predicateName}/${arity}`;
+                    if (!this.definedPredicates.has(predicateKey)) {
+                        this.definedPredicates.set(predicateKey, []);
+                    }
+                    this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                })
+            }
+        } else {
+            const predicateKey = `${predicateName}/0`
+            if (!this.definedPredicates.has(predicateKey)) {
+                this.definedPredicates.set(predicateKey, []);
+            }
+            this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+        }
+
+        if(generalTerms) {
+            generalTerms.forEach(generalTerm => {
+                const terms = generalTerm.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, this.definedPredicates, true);
+                    });
+                }
+            });
+        }
+
+        // Check for unsafe variables
+        let totalVariables = new Set();
+        let groundedVariables = new Set();
+        let linkedVariables = [];
+
+        let contextVariables = [];
+        let groundedContextVariables = [];
+        let linkedContextVariables = [];
+
+        if(ctx.classical_atom()) {
+            const generalTerms = ctx.classical_atom().atom().generalTerm();
+            if(generalTerms) {
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            const result = this.collectVariablesFromTermOrInterval(term);
+                            if(result.skip) {
+                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                // As a result, we will simply skip these cases and not throw any errors.
+                            } else {
+                                result.allVars.forEach(v => totalVariables.add(v));
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        if(ctx.body()) {
+            const body = ctx.body();
+            const body_atoms = body.body_atoms();
+            if(body_atoms) {
+                body_atoms.forEach(body_atom => {
+                    if(body_atom.literal()) {
+                        const literal = body_atom.literal();
+                        const hasNot = literal.NOT().length > 0;
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    } else if(body_atom.builtIn_atom()) {
+                        const isNegated = body_atom.NOT().length == 1;
+                        const builtIn_atom = body_atom.builtIn_atom();
+
+                        const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, false);
+                        result.vars.forEach(v => totalVariables.add(v));
+                        result.groundedVars.forEach(v => groundedVariables.add(v));
+                        result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
+                    } else if(body_atom.aggregate_atom_body()) {
+                        const aggregate_atom = body_atom.aggregate_atom_body();
+                        const term = aggregate_atom.termOrInterval();
+                        if(term) {
+                            // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
+                            // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
+                            let aggregateVariables = new Set();
+                            let aggregateGroundedVariables = new Set();
+                            let aggregateLinkedVariables = [];
+
+                            const result = this.collectVariablesFromAggregateAtomBody(aggregate_atom);
+                            result.aggregateVariables.forEach(v => aggregateVariables.add(v));
+                            result.aggregateGroundedVariables.forEach(v => aggregateGroundedVariables.add(v));
+                            result.aggregateLinkedVariables.forEach(linkedVar => aggregateLinkedVariables.push(linkedVar));
+                        
+                            contextVariables.push(aggregateVariables);
+                            groundedContextVariables.push(aggregateGroundedVariables);
+                            linkedContextVariables.push(aggregateLinkedVariables);
+
+                            // A special case seems to happen in aggregate atoms in the body. If the aggregate has an equality comparison ('=' or '==') then it is possible for the 
+                            // comparison term to be grounded. However, it only happens if the variables inside the comparison term are not used inside the aggregate itself
+                            // For example: {q(N)} :- #count{V,X,Y: term(V,X,Y)}=N.     Here, N is grounded because it is used in an equality comparison, and not used inside the aggregate
+                            // If we change it to: {q(N)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Y).     Then N is not grounded (nor is Y).
+                            // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
+
+                            const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
+
+                            if(termResult.skip) {
+                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                // As a result, we will simply skip these cases and not throw any errors.
+                            } else {
+                                // If NONE of the variables in the term appear inside the aggregate and has an equality constraint
+                                if([...termResult.allVars].every(v => !aggregateVariables.has(v)) && hasEquality) {
+                                    termResult.allVars.forEach(v => {
+                                        totalVariables.add(v)
+                                        groundedVariables.add(v)
+                                    })
+                                } else {
+                                    termResult.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+                    } else if(body_atom.choice()) {
+                        const hasNot = body_atom.NOT().length > 0;
+                        const choice = body_atom.choice();
+
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+
+                        if(choice.comparatorTerm2()) {
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
+                    }
+                });
+            }
+        }
+
+        const result = Array.from(this.verifyUnsafeVariables(totalVariables, groundedVariables, linkedVariables, contextVariables, groundedContextVariables, linkedContextVariables));
+        if(result.length > 0) {
+            this.unsafeVariables.push({
+                unsafeVariables: result,
+                lineStart: ctx.start.line,
+                lineEnd: ctx.stop.line,
+                indexStart: ctx.start.column,
+                indexEnd: ctx.stop.column + 1
+            })
+        }
+    }
+
+    enterHeuristic(ctx) {
+        if (!ctx.start || !ctx.stop) return;
+
+        const atom = ctx.classical_atom().atom();
+        if (!atom || !atom.start || !atom.stop) return;
+        const predicateName = atom.CONSTANT().getText();
+        const atomText = atom.getText();
+        let hasArgs = false;
+        let argsText;
+        if(atomText.indexOf('(') != -1) {
+            hasArgs = true;
+            argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+        }
+        const generalTerms = atom.generalTerm();
+
+        const lineStart = atom.start.line;
+        const lineEnd = atom.stop.line;
+        const indexStart = atom.start.column;
+        let indexEnd = atom.stop.column;
+
+        if(indexEnd == indexStart) {
+            indexEnd += predicateName.length;
+        }
+
+        if(hasArgs) {
+            const arities = new Set();
+            let nest = 0;
+            let arity = 0;
+            let hasToken = false;
+            let lastNonWS = '';
+
+            for (let i = 0; i < argsText.length; i++) {
+                const ch = argsText[i];
+                if (!/\s/.test(ch)) lastNonWS = ch;
+
+                if (ch === '(') {
+                    nest++;
+                } else if (ch === ')') {
+                    nest--;
+                } else if (ch === ',' && nest === 0) {
+                    arity++;
+                    hasToken = false;
+                } else if (ch === ';' && nest === 0) {
+                    arities.add(hasToken ? arity + 1 : arity);
+                    hasToken = false;
+                    arity = 0;
+                } else if (ch.trim() !== '') {
+                    hasToken = true;
+                }
+            }
+
+            if (hasToken || arity > 0) {
+                arities.add(arity + (hasToken ? 1 : 0));
+            } else if (lastNonWS === ';') {
+                arities.add(0);
+            }
+
+            if(arities.size == 0) {
+                const predicateKey = `${predicateName}/0`;
+                if (!this.usedPredicates.has(predicateKey)) {
+                    this.usedPredicates.set(predicateKey, []);
+                }
+                this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+            } else {
+                arities.forEach(arity => {
+                    const predicateKey = `${predicateName}/${arity}`;
+                    if (!this.usedPredicates.has(predicateKey)) {
+                        this.usedPredicates.set(predicateKey, []);
+                    }
+                    this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                })
+            }
+        } else {
+            const predicateKey = `${predicateName}/0`
+            if (!this.usedPredicates.has(predicateKey)) {
+                this.usedPredicates.set(predicateKey, []);
+            }
+            this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+        }
+
+        if(generalTerms) {
+            generalTerms.forEach(generalTerm => {
+                const terms = generalTerm.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, this.usedPredicates, true);
+                    }); 
+                }
+            });
+        }
+
+        // Check for unsafe variables
+        let totalVariables = new Set();
+        let groundedVariables = new Set();
+        let linkedVariables = [];
+
+        let contextVariables = [];
+        let groundedContextVariables = [];
+        let linkedContextVariables = [];
+
+        if(ctx.classical_atom()) {
+            const generalTerms = ctx.classical_atom().atom().generalTerm();
+            if(generalTerms) {
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            const result = this.collectVariablesFromTermOrInterval(term);
+                            if(result.skip) {
+                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                // As a result, we will simply skip these cases and not throw any errors.
+                            } else {
+                                result.allVars.forEach(v => groundedVariables.add(v));
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        if(ctx.termOrInterval()) {
+            const terms = ctx.termOrInterval();
+            if(terms) {
+                terms.forEach(term => {
+                    const result = this.collectVariablesFromTermOrInterval(term);
+                    if(result.skip) {
+                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                        // As a result, we will simply skip these cases and not throw any errors.
+                    } else {
+                        result.allVars.forEach(v => totalVariables.add(v));
+                    }
+                });
+            }
+        }
+
+        if(ctx.body()) {
+            const body = ctx.body();
+            const body_atoms = body.body_atoms();
+            if(body_atoms) {
+                body_atoms.forEach(body_atom => {
+                    if(body_atom.literal()) {
+                        const literal = body_atom.literal();
+                        const hasNot = literal.NOT().length > 0;
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    } else if(body_atom.builtIn_atom()) {
+                        const isNegated = body_atom.NOT().length == 1;
+                        const builtIn_atom = body_atom.builtIn_atom();
+
+                        const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, false);
+                        result.vars.forEach(v => totalVariables.add(v));
+                        result.groundedVars.forEach(v => groundedVariables.add(v));
+                        result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
+                    } else if(body_atom.aggregate_atom_body()) {
+                        const aggregate_atom = body_atom.aggregate_atom_body();
+                        const term = aggregate_atom.termOrInterval();
+                        if(term) {
+                            // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
+                            // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
+                            let aggregateVariables = new Set();
+                            let aggregateGroundedVariables = new Set();
+                            let aggregateLinkedVariables = [];
+
+                            const result = this.collectVariablesFromAggregateAtomBody(aggregate_atom);
+                            result.aggregateVariables.forEach(v => aggregateVariables.add(v));
+                            result.aggregateGroundedVariables.forEach(v => aggregateGroundedVariables.add(v));
+                            result.aggregateLinkedVariables.forEach(linkedVar => aggregateLinkedVariables.push(linkedVar));
+                        
+                            contextVariables.push(aggregateVariables);
+                            groundedContextVariables.push(aggregateGroundedVariables);
+                            linkedContextVariables.push(aggregateLinkedVariables);
+
+                            // A special case seems to happen in aggregate atoms in the body. If the aggregate has an equality comparison ('=' or '==') then it is possible for the 
+                            // comparison term to be grounded. However, it only happens if the variables inside the comparison term are not used inside the aggregate itself
+                            // For example: {q(N)} :- #count{V,X,Y: term(V,X,Y)}=N.     Here, N is grounded because it is used in an equality comparison, and not used inside the aggregate
+                            // If we change it to: {q(N)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Y).     Then N is not grounded (nor is Y).
+                            // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
+
+                            const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
+
+                            if(termResult.skip) {
+                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                // As a result, we will simply skip these cases and not throw any errors.
+                            } else {
+                                // If NONE of the variables in the term appear inside the aggregate and has an equality constraint
+                                if([...termResult.allVars].every(v => !aggregateVariables.has(v)) && hasEquality) {
+                                    termResult.allVars.forEach(v => {
+                                        totalVariables.add(v)
+                                        groundedVariables.add(v)
+                                    })
+                                } else {
+                                    termResult.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+                    } else if(body_atom.choice()) {
+                        const hasNot = body_atom.NOT().length > 0;
+                        const choice = body_atom.choice();
+
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+
+                        if(choice.comparatorTerm2()) {
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
+                            }
+                        }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
+                    }
+                });
+            }
+        }
+
+
+
+        const result = Array.from(this.verifyUnsafeVariables(totalVariables, groundedVariables, linkedVariables, contextVariables, groundedContextVariables, linkedContextVariables));
+        if(result.length > 0) {
+            this.unsafeVariables.push({
+                unsafeVariables: result,
+                lineStart: ctx.start.line,
+                lineEnd: ctx.stop.line,
+                indexStart: ctx.start.column,
+                indexEnd: ctx.stop.column + 1
+            })
+        }
     }
 
     enterConstant(ctx) {
@@ -216,11 +818,6 @@ class VerboseASPListener extends ASPListener {
                 indexStart: ctx.start.column,
                 indexEnd: ctx.stop.column,
             });
-
-            if(!this.statementsByLine.has(ctx.start.line)) {
-                this.statementsByLine.set(ctx.start.line, []);
-            }
-            this.statementsByLine.get(ctx.start.line).push(ctx.getText());
         }
     }
 
@@ -234,11 +831,6 @@ class VerboseASPListener extends ASPListener {
             indexStart: ctx.start.column,
             indexEnd: ctx.stop.column,
         });
-
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
 
         // Check for unsafe variables
         let totalVariables = new Set();
@@ -259,11 +851,28 @@ class VerboseASPListener extends ASPListener {
             
             const choice = ctx.choice();
             
-            if(choice.generalTerm()) {
-                const terms = choice.generalTerm();
-                terms.forEach(term => {
-                    this.processGeneralTerm(term, this.usedPredicates, false);
-                    const result = this.collectVariablesFromGeneralTerm(term)
+            if(choice.termOrInterval()) {
+                const terms = choice.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, this.usedPredicates, false);
+                        const result = this.collectVariablesFromTermOrInterval(term)
+                        if(result.skip) {
+                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                            // As a result, we will simply skip these cases and not throw any errors.
+                        } else {
+                            result.allVars.forEach(v => totalVariables.add(v));
+                        }
+                    })
+                }
+            }
+
+            if(choice.comparatorTerm1()) {
+                const term = choice.comparatorTerm1().termOrInterval();
+                if(term) {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
+                    const result = this.collectVariablesFromTermOrInterval(term)
                     if(result.skip) {
                         // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                         // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
@@ -271,32 +880,21 @@ class VerboseASPListener extends ASPListener {
                     } else {
                         result.allVars.forEach(v => totalVariables.add(v));
                     }
-                })
-            }
-
-            if(choice.comparatorTerm1()) {
-                const term = choice.comparatorTerm1().generalTerm();
-                this.processGeneralTerm(term, this.usedPredicates, false);
-                const result = this.collectVariablesFromGeneralTerm(term)
-                if(result.skip) {
-                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                    // As a result, we will simply skip these cases and not throw any errors.
-                } else {
-                    result.allVars.forEach(v => totalVariables.add(v));
                 }
             }
 
             if(choice.comparatorTerm2()) {
-                const term = choice.comparatorTerm2().generalTerm();
-                this.processGeneralTerm(term, this.usedPredicates, false);
-                const result = this.collectVariablesFromGeneralTerm(term)
-                if(result.skip) {
-                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                    // As a result, we will simply skip these cases and not throw any errors.
-                } else {
-                    result.allVars.forEach(v => totalVariables.add(v));
+                const term = choice.comparatorTerm2().termOrInterval();
+                if(term) {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
+                    const result = this.collectVariablesFromTermOrInterval(term)
+                    if(result.skip) {
+                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                        // As a result, we will simply skip these cases and not throw any errors.
+                    } else {
+                        result.allVars.forEach(v => totalVariables.add(v));
+                    }
                 }
             }
 
@@ -321,7 +919,7 @@ class VerboseASPListener extends ASPListener {
                             hasArgs = true;
                             argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                         }
-                        const terms = atom.generalTerm();
+                        const generalTerms = atom.generalTerm();
 
                         const lineStart = atom.start.line;
                         const lineEnd = atom.stop.line;
@@ -389,16 +987,21 @@ class VerboseASPListener extends ASPListener {
                         }
 
                         // Variable Safety
-                        if(terms) {
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, true);
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => choiceVariables.add(v));
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        this.processTermOrInterval(term, this.usedPredicates, true);
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => choiceVariables.add(v));
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -432,7 +1035,7 @@ class VerboseASPListener extends ASPListener {
                                     hasArgs = true;
                                     argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                                 }
-                                const terms = atom.generalTerm();
+                                const generalTerms = atom.generalTerm();
 
                                 const lineStart = atom.start.line;
                                 const lineEnd = atom.stop.line;
@@ -500,26 +1103,28 @@ class VerboseASPListener extends ASPListener {
                                 }
 
                                 // Variable Safety
-                                if(terms) {
-                                    terms.forEach(term => {
-                                        this.processGeneralTerm(term, this.usedPredicates, true);
+                                if(generalTerms) {
+                                    generalTerms.forEach(generalTerm => {
+                                        const terms = generalTerm.termOrInterval();
+                                        if(terms) {
+                                            terms.forEach(term => {
+                                                this.processTermOrInterval(term, this.usedPredicates, true);
+                                                const result = this.collectVariablesFromTermOrInterval(term);
 
-                                        const result = this.collectVariablesFromGeneralTerm(term);
-
-                                        if(result.skip) {
-                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), 
-                                            // a 'undefined operation' message is shown. This could be implemented in this parser, however it requires tracking the typing of every element 
-                                            // that can be used in arithmetic operations.
-                                            // As a result, we will simply skip these cases and not throw any errors.
-                                        } else {
-                                            result.allVars.forEach(v => {
-                                                // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                                if(!v.startsWith('#Anon'))
-                                                    choiceVariables.add(v)
+                                                if(result.skip) {
+                                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), 
+                                                    // a 'undefined operation' message is shown. This could be implemented in this parser, however it requires tracking the typing of every element 
+                                                    // that can be used in arithmetic operations.
+                                                    // As a result, we will simply skip these cases and not throw any errors.
+                                                } else {
+                                                    result.allVars.forEach(v => {
+                                                        choiceVariables.add(v)
+                                                    });
+                                                    if(!hasNot) {
+                                                        result.groundableVars.forEach(v => choiceGroundedVariables.add(v));
+                                                    }
+                                                } 
                                             });
-                                            if(!hasNot) {
-                                                result.groundableVars.forEach(v => choiceGroundedVariables.add(v));
-                                            }
                                         }
                                     });
                                 }
@@ -544,15 +1149,17 @@ class VerboseASPListener extends ASPListener {
             if(head.aggregate_atom_head()) {
                 const aggregate_atom = head.aggregate_atom_head();
 
-                if(aggregate_atom.generalTerm()) {
-                    const term = aggregate_atom.generalTerm();
-                    const result = this.collectVariablesFromGeneralTerm(term);
-                    if(result.skip) {
-                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                        // As a result, we will simply skip these cases and not throw any errors.
-                    } else {
-                        result.allVars.forEach(v => totalVariables.add(v));
+                if(aggregate_atom.termOrInterval()) {
+                    const term = aggregate_atom.termOrInterval();
+                    if(term) {
+                        const result = this.collectVariablesFromTermOrInterval(term);
+                        if(result.skip) {
+                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                            // As a result, we will simply skip these cases and not throw any errors.
+                        } else {
+                            result.allVars.forEach(v => totalVariables.add(v));
+                        }
                     }
                 }
                 
@@ -565,16 +1172,21 @@ class VerboseASPListener extends ASPListener {
                 const atoms = head.head_atoms();
                 atoms.forEach(head_atom => {
                     if(head_atom.literal()) {
-                        const terms = head_atom.literal().classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                        const generalTerms = head_atom.literal().classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => totalVariables.add(v));
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -586,6 +1198,12 @@ class VerboseASPListener extends ASPListener {
                         result.vars.forEach(v => totalVariables.add(v));
                         result.groundedVars.forEach(v => groundedVariables.add(v));
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
+                    } else if(head_atom.conditional()) {
+                        const conditional = head_atom.conditional();
+                        const result = this.collectVariablesFromHeadConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 })
             }
@@ -625,11 +1243,28 @@ class VerboseASPListener extends ASPListener {
 
         const choice = ctx.choice();
         if (choice) {
-            if(choice.generalTerm()) {
-                const terms = choice.generalTerm();
-                terms.forEach(term => {
-                    this.processGeneralTerm(term, this.usedPredicates, false);
-                    const result = this.collectVariablesFromGeneralTerm(term)
+            if(choice.termOrInterval()) {
+                const terms = choice.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, this.usedPredicates, false);
+                        const result = this.collectVariablesFromTermOrInterval(term)
+                        if(result.skip) {
+                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                            // As a result, we will simply skip these cases and not throw any errors.
+                        } else {
+                            result.allVars.forEach(v => totalVariables.add(v));
+                        }
+                    })
+                }
+            }
+
+            if(choice.comparatorTerm1()) {
+                const term = choice.comparatorTerm1().termOrInterval();
+                if(term) {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
+                    const result = this.collectVariablesFromTermOrInterval(term)
                     if(result.skip) {
                         // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                         // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
@@ -637,32 +1272,21 @@ class VerboseASPListener extends ASPListener {
                     } else {
                         result.allVars.forEach(v => totalVariables.add(v));
                     }
-                })
-            }
-
-            if(choice.comparatorTerm1()) {
-                const term = choice.comparatorTerm1().generalTerm();
-                this.processGeneralTerm(term, this.usedPredicates, false);
-                const result = this.collectVariablesFromGeneralTerm(term)
-                if(result.skip) {
-                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                    // As a result, we will simply skip these cases and not throw any errors.
-                } else {
-                    result.allVars.forEach(v => totalVariables.add(v));
                 }
             }
 
             if(choice.comparatorTerm2()) {
-                const term = choice.comparatorTerm2().generalTerm();
-                this.processGeneralTerm(term, this.usedPredicates, false);
-                const result = this.collectVariablesFromGeneralTerm(term)
-                if(result.skip) {
-                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                    // As a result, we will simply skip these cases and not throw any errors.
-                } else {
-                    result.allVars.forEach(v => totalVariables.add(v));
+                const term = choice.comparatorTerm2().termOrInterval();
+                if(term) {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
+                    const result = this.collectVariablesFromTermOrInterval(term)
+                    if(result.skip) {
+                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                        // As a result, we will simply skip these cases and not throw any errors.
+                    } else {
+                        result.allVars.forEach(v => totalVariables.add(v));
+                    }
                 }
             }
 
@@ -690,7 +1314,7 @@ class VerboseASPListener extends ASPListener {
                             hasArgs = true;
                             argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                         }
-                        const terms = atom.generalTerm();
+                        const generalTerms = atom.generalTerm();
 
                         const lineStart = atom.start.line;
                         const lineEnd = atom.stop.line;
@@ -758,16 +1382,21 @@ class VerboseASPListener extends ASPListener {
                         }
 
                         // Variable Safety
-                        if(terms) {
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, true);
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => choiceVariables.add(v));
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, true);
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => choiceVariables.add(v));
+                                        } 
+                                    });
                                 }
                             });
                         }
@@ -803,7 +1432,7 @@ class VerboseASPListener extends ASPListener {
                                 hasArgs = true;
                                 argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                             }
-                            const terms = atom.generalTerm();
+                            const generalTerms = atom.generalTerm();
 
                             const lineStart = atom.start.line;
                             const lineEnd = atom.stop.line;
@@ -871,28 +1500,30 @@ class VerboseASPListener extends ASPListener {
                             }
 
                             // Variable Safety
-                            if(terms) {
-                                terms.forEach(term => {
-                                    this.processGeneralTerm(term, this.usedPredicates, true);
+                            if(generalTerms) {
+                                generalTerms.forEach(generalTerm => {
+                                    const terms = generalTerm.termOrInterval();
+                                    if(terms) {
+                                        terms.forEach(term => {
+                                            this.processTermOrInterval(term, this.usedPredicates, true);
+                                            const result = this.collectVariablesFromTermOrInterval(term);
 
-                                    const result = this.collectVariablesFromGeneralTerm(term);
-
-                                    if(result.skip) {
-                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                        // As a result, we will simply skip these cases and not throw any errors.
-                                    } else {
-                                        result.allVars.forEach(v => {
-                                            // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                            if(!v.startsWith('#Anon'))
-                                                choiceVariables.add(v)
-                                        });
-                                        if(!hasNot) {
-                                            result.groundableVars.forEach(v => choiceGroundedVariables.add(v));
-                                            if(!hasMultipleElements) {
-                                                result.groundableVars.forEach(v => headGroundedVariables.add(v));
+                                            if(result.skip) {
+                                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                                // As a result, we will simply skip these cases and not throw any errors.
+                                            } else {
+                                                result.allVars.forEach(v => {
+                                                    choiceVariables.add(v)
+                                                });
+                                                if(!hasNot) {
+                                                    result.groundableVars.forEach(v => choiceGroundedVariables.add(v));
+                                                    if(!hasMultipleElements) {
+                                                        result.groundableVars.forEach(v => headGroundedVariables.add(v));
+                                                    }
+                                                }
                                             }
-                                        }
+                                        });
                                     }
                                 });
                             }
@@ -924,26 +1555,27 @@ class VerboseASPListener extends ASPListener {
                     if(body_atom.literal()) {
                         const literal = body_atom.literal();
                         const hasNot = literal.NOT().length > 0;
-                        const terms = literal.classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => {
-                                        // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                        if(!v.startsWith('#Anon'))
-                                            totalVariables.add(v)
-                                    });
-                                    if(!hasNot) {
-                                        result.groundableVars.forEach(v => groundedVariables.add(v));
-                                    }
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
+                                    })
                                 }
-                                
                             });
                         }
                     } else if(body_atom.builtIn_atom()) {
@@ -963,7 +1595,7 @@ class VerboseASPListener extends ASPListener {
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
                     } else if(body_atom.aggregate_atom_body()) {
                         const aggregate_atom = body_atom.aggregate_atom_body();
-                        const term = aggregate_atom.generalTerm();
+                        const term = aggregate_atom.termOrInterval();
                         if(term) {
                             // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
                             // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
@@ -987,7 +1619,7 @@ class VerboseASPListener extends ASPListener {
                             // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
 
                             const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
-                            const termResult = this.collectVariablesFromGeneralTerm(term);
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
 
                             if(termResult.skip) {
                                 // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -1014,50 +1646,62 @@ class VerboseASPListener extends ASPListener {
                         const hasNot = body_atom.NOT().length > 0;
                         const choice = body_atom.choice();
 
-                        if(choice.generalTerm()) {
-                            const terms = choice.generalTerm();
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result = this.collectVariablesFromGeneralTerm(term)
-                                if(result.skip) {
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                     // As a result, we will simply skip these cases and not throw any errors.
                                 } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
                                 }
-                            })
-                        }
-
-                        if(choice.comparatorTerm1()) {
-                            const term = choice.comparatorTerm1().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result1 = this.collectVariablesFromGeneralTerm(term)
-                            if(result1.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result1.groundableVars.forEach(v => groundedVariables.add(v));
-                                result1.allVars.forEach(v => totalVariables.add(v));
                             }
                         }
 
                         if(choice.comparatorTerm2()) {
-                            const term = choice.comparatorTerm2().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result2 = this.collectVariablesFromGeneralTerm(term)
-                            if(result2.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result2.groundableVars.forEach(v => groundedVariables.add(v));
-                                result2.allVars.forEach(v => totalVariables.add(v));
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
                             }
                         }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 });
             }
@@ -1081,11 +1725,6 @@ class VerboseASPListener extends ASPListener {
             indexStart: ctx.start.column,
             indexEnd: ctx.stop.column,
         });
-
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
     }
 
     enterDefinite_rule(ctx) {
@@ -1098,11 +1737,6 @@ class VerboseASPListener extends ASPListener {
             indexStart: ctx.start.column,
             indexEnd: ctx.stop.column,
         });
-
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
 
         // Check for unsafe variables
         let totalVariables = new Set();
@@ -1118,16 +1752,18 @@ class VerboseASPListener extends ASPListener {
             if(head.aggregate_atom_head()) {
                 const aggregate_atom = head.aggregate_atom_head();
 
-                if(aggregate_atom.generalTerm()) {
-                    const term = aggregate_atom.generalTerm();
-                    const result = this.collectVariablesFromGeneralTerm(term);
+                if(aggregate_atom.termOrInterval()) {
+                    const term = aggregate_atom.termOrInterval();
+                    if(term) {
+                        const result = this.collectVariablesFromTermOrInterval(term);
 
-                    if(result.skip) {
-                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                        // As a result, we will simply skip these cases and not throw any errors.
-                    } else {
-                        result.allVars.forEach(v => totalVariables.add(v));
+                        if(result.skip) {
+                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                            // As a result, we will simply skip these cases and not throw any errors.
+                        } else {
+                            result.allVars.forEach(v => totalVariables.add(v));
+                        }
                     }
                 }
                 
@@ -1139,16 +1775,21 @@ class VerboseASPListener extends ASPListener {
                 const head_atoms = head.head_atoms();
                 head_atoms.forEach(head_atom => {
                     if(head_atom.literal()) {
-                        const terms = head_atom.literal().classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                        const generalTerms = head_atom.literal().classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => totalVariables.add(v));
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -1160,6 +1801,12 @@ class VerboseASPListener extends ASPListener {
                         result.vars.forEach(v => totalVariables.add(v));
                         result.groundedVars.forEach(v => groundedVariables.add(v));
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
+                    } else if(head_atom.conditional()) {
+                        const conditional = head_atom.conditional();
+                        const result = this.collectVariablesFromHeadConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 });
             }
@@ -1173,23 +1820,26 @@ class VerboseASPListener extends ASPListener {
                     if(body_atom.literal()) {
                         const literal = body_atom.literal();
                         const hasNot = literal.NOT().length > 0;
-                        const terms = literal.classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => {
-                                        // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                        if(!v.startsWith('#Anon'))
-                                            totalVariables.add(v)
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
                                     });
-                                    if(!hasNot) {
-                                        result.groundableVars.forEach(v => groundedVariables.add(v));
-                                    }
                                 }
                             });
                         }
@@ -1203,7 +1853,7 @@ class VerboseASPListener extends ASPListener {
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
                     } else if(body_atom.aggregate_atom_body()) {
                         const aggregate_atom = body_atom.aggregate_atom_body();
-                        const term = aggregate_atom.generalTerm();
+                        const term = aggregate_atom.termOrInterval();
                         if(term) {
                             // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
                             // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
@@ -1227,7 +1877,7 @@ class VerboseASPListener extends ASPListener {
                             // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
 
                             const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
-                            const termResult = this.collectVariablesFromGeneralTerm(term);
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
 
                             if(termResult.skip) {
                                 // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -1249,50 +1899,62 @@ class VerboseASPListener extends ASPListener {
                         const hasNot = body_atom.NOT().length > 0;
                         const choice = body_atom.choice();
 
-                        if(choice.generalTerm()) {
-                            const terms = choice.generalTerm();
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result = this.collectVariablesFromGeneralTerm(term)
-                                if(result.skip) {
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                     // As a result, we will simply skip these cases and not throw any errors.
                                 } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
                                 }
-                            })
-                        }
-
-                        if(choice.comparatorTerm1()) {
-                            const term = choice.comparatorTerm1().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result1 = this.collectVariablesFromGeneralTerm(term)
-                            if(result1.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result1.groundableVars.forEach(v => groundedVariables.add(v));
-                                result1.allVars.forEach(v => totalVariables.add(v));
                             }
                         }
 
                         if(choice.comparatorTerm2()) {
-                            const term = choice.comparatorTerm2().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result2 = this.collectVariablesFromGeneralTerm(term)
-                            if(result2.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result2.groundableVars.forEach(v => groundedVariables.add(v));
-                                result2.allVars.forEach(v => totalVariables.add(v));
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
                             }
                         }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 });
             }
@@ -1321,11 +1983,6 @@ class VerboseASPListener extends ASPListener {
             indexEnd: ctx.stop.column,
         });
 
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
-
         // Check for unsafe variables
         let totalVariables = new Set();
         let groundedVariables = new Set();
@@ -1343,23 +2000,26 @@ class VerboseASPListener extends ASPListener {
                     if(body_atom.literal()) {
                         const literal = body_atom.literal();
                         const hasNot = literal.NOT().length > 0;
-                        const terms = literal.classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => {
-                                        // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                        if(!v.startsWith('#Anon'))
-                                            totalVariables.add(v)
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
                                     });
-                                    if(!hasNot) {
-                                        result.groundableVars.forEach(v => groundedVariables.add(v));
-                                    }
                                 }
                             });
                         }
@@ -1373,7 +2033,7 @@ class VerboseASPListener extends ASPListener {
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
                     } else if(body_atom.aggregate_atom_body()) {
                         const aggregate_atom = body_atom.aggregate_atom_body();
-                        const term = aggregate_atom.generalTerm();
+                        const term = aggregate_atom.termOrInterval();
                         if(term) {                            
                             // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
                             // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
@@ -1397,7 +2057,7 @@ class VerboseASPListener extends ASPListener {
                             // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
 
                             const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
-                            const termResult = this.collectVariablesFromGeneralTerm(term);
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
 
                             if(termResult.skip) {
                                 // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -1419,50 +2079,62 @@ class VerboseASPListener extends ASPListener {
                         const hasNot = body_atom.NOT().length > 0;
                         const choice = body_atom.choice();
 
-                        if(choice.generalTerm()) {
-                            const terms = choice.generalTerm();
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result = this.collectVariablesFromGeneralTerm(term)
-                                if(result.skip) {
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                     // As a result, we will simply skip these cases and not throw any errors.
                                 } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
                                 }
-                            })
-                        }
-
-                        if(choice.comparatorTerm1()) {
-                            const term = choice.comparatorTerm1().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result1 = this.collectVariablesFromGeneralTerm(term)
-                            if(result1.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result1.groundableVars.forEach(v => groundedVariables.add(v));
-                                result1.allVars.forEach(v => totalVariables.add(v));
                             }
                         }
 
                         if(choice.comparatorTerm2()) {
-                            const term = choice.comparatorTerm2().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result2 = this.collectVariablesFromGeneralTerm(term)
-                            if(result2.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result2.groundableVars.forEach(v => groundedVariables.add(v));
-                                result2.allVars.forEach(v => totalVariables.add(v));
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
                             }
                         }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 });
             }
@@ -1496,19 +2168,21 @@ class VerboseASPListener extends ASPListener {
                 let aggregateGroundedVariables = new Set();
                 let aggregateLinkedVariables = [];
 
-                if(aggregateElement.generalTerm()) {
-                    const terms = aggregateElement.generalTerm();
-                    terms.forEach(term => {
-                        this.processGeneralTerm(term, this.usedPredicates, false);
-                        const result = this.collectVariablesFromGeneralTerm(term);
-                        if(result.skip) {
-                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                            // As a result, we will simply skip these cases and not throw any errors.
-                        } else {
-                            result.allVars.forEach(v => aggregateVariables.add(v));
-                        }
-                    });
+                if(aggregateElement.termOrInterval()) {
+                    const terms = aggregateElement.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            this.processTermOrInterval(term, this.usedPredicates, false);
+                            const result = this.collectVariablesFromTermOrInterval(term);
+                            if(result.skip) {
+                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                // As a result, we will simply skip these cases and not throw any errors.
+                            } else {
+                                result.allVars.forEach(v => aggregateVariables.add(v));
+                            }
+                        });
+                    }
                 }
     
                 if(aggregateElement.aggregate_literal()) {
@@ -1527,7 +2201,7 @@ class VerboseASPListener extends ASPListener {
                                 hasArgs = true;
                                 argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                             }
-                            const terms = atom.generalTerm();
+                            const generalTerms = atom.generalTerm();
 
                             const lineStart = atom.start.line;
                             const lineEnd = atom.stop.line;
@@ -1595,24 +2269,26 @@ class VerboseASPListener extends ASPListener {
                             }
 
                             // Variable Safety
-                            if(terms) {
-                                terms.forEach(term => {
-                                    this.processGeneralTerm(term, this.usedPredicates, true);
-
-                                    const result = this.collectVariablesFromGeneralTerm(term);
-                                    if(result.skip) {
-                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                        // As a result, we will simply skip these cases and not throw any errors.
-                                    } else {
-                                        result.allVars.forEach(v => {
-                                            // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                            if(!v.startsWith('#Anon'))
-                                                aggregateVariables.add(v)
+                            if(generalTerms) {
+                                generalTerms.forEach(generalTerm => {
+                                    const terms = generalTerm.termOrInterval();
+                                    if(terms) {
+                                        terms.forEach(term => {
+                                            this.processTermOrInterval(term, this.usedPredicates, true);
+                                            const result = this.collectVariablesFromTermOrInterval(term);
+                                            if(result.skip) {
+                                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                                // As a result, we will simply skip these cases and not throw any errors.
+                                            } else {
+                                                result.allVars.forEach(v => {
+                                                    aggregateVariables.add(v)
+                                                });
+                                                if(!hasNot) {
+                                                    result.groundableVars.forEach(v => aggregateGroundedVariables.add(v));
+                                                }
+                                            } 
                                         });
-                                        if(!hasNot) {
-                                            result.groundableVars.forEach(v => aggregateGroundedVariables.add(v));
-                                        }
                                     }
                                 });
                             }
@@ -1640,11 +2316,6 @@ class VerboseASPListener extends ASPListener {
             indexStart: ctx.start.column,
             indexEnd: ctx.stop.column
         });
-
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
 
         const result = Array.from(this.verifyUnsafeVariables(new Set(), new Set(), [], contextVariables, groundedContextVariables, linkedContextVariables));
         if(result.length > 0) {
@@ -1679,23 +2350,26 @@ class VerboseASPListener extends ASPListener {
                     if(body_atom.literal()) {
                         const literal = body_atom.literal();
                         const hasNot = literal.NOT().length > 0;
-                        const terms = literal.classical_atom().atom().generalTerm();
-                        if(terms) {
-                            terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
-                                if(result.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    result.allVars.forEach(v => {
-                                        // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                        if(!v.startsWith('#Anon'))
-                                            totalVariables.add(v)
+                        const generalTerms = literal.classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => {
+                                                totalVariables.add(v)
+                                            });
+                                            if(!hasNot) {
+                                                result.groundableVars.forEach(v => groundedVariables.add(v));
+                                            }
+                                        }
                                     });
-                                    if(!hasNot) {
-                                        result.groundableVars.forEach(v => groundedVariables.add(v));
-                                    }
                                 }
                             });
                         }
@@ -1709,7 +2383,7 @@ class VerboseASPListener extends ASPListener {
                         result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
                     } else if(body_atom.aggregate_atom_body()) {
                         const aggregate_atom = body_atom.aggregate_atom_body();
-                        const term = aggregate_atom.generalTerm();
+                        const term = aggregate_atom.termOrInterval();
                         if(term) {
                             // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
                             // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
@@ -1733,7 +2407,7 @@ class VerboseASPListener extends ASPListener {
                             // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
 
                             const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
-                            const termResult = this.collectVariablesFromGeneralTerm(term);
+                            const termResult = this.collectVariablesFromTermOrInterval(term);
 
                             if(termResult.skip) {
                                 // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -1755,70 +2429,84 @@ class VerboseASPListener extends ASPListener {
                         const hasNot = body_atom.NOT().length > 0;
                         const choice = body_atom.choice();
 
-                        if(choice.generalTerm()) {
-                            const terms = choice.generalTerm();
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result = this.collectVariablesFromGeneralTerm(term)
-                                if(result.skip) {
+                        if(choice.termOrInterval()) {
+                            const terms = choice.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result = this.collectVariablesFromTermOrInterval(term)
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => totalVariables.add(v));
+                                    }
+                                })
+                            }
+                        }
+
+                        if(choice.comparatorTerm1()) {
+                            const term = choice.comparatorTerm1().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result1 = this.collectVariablesFromTermOrInterval(term)
+                                if(result1.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                     // As a result, we will simply skip these cases and not throw any errors.
                                 } else {
-                                    result.allVars.forEach(v => totalVariables.add(v));
+                                    if(!hasNot)
+                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result1.allVars.forEach(v => totalVariables.add(v));
                                 }
-                            })
-                        }
-
-                        if(choice.comparatorTerm1()) {
-                            const term = choice.comparatorTerm1().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result1 = this.collectVariablesFromGeneralTerm(term)
-                            if(result1.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result1.groundableVars.forEach(v => groundedVariables.add(v));
-                                result1.allVars.forEach(v => totalVariables.add(v));
                             }
                         }
 
                         if(choice.comparatorTerm2()) {
-                            const term = choice.comparatorTerm2().generalTerm();
-                            this.processGeneralTerm(term, this.usedPredicates, false);
-                            const result2 = this.collectVariablesFromGeneralTerm(term)
-                            if(result2.skip) {
-                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                // As a result, we will simply skip these cases and not throw any errors.
-                            } else {
-                                if(!hasNot)
-                                    result2.groundableVars.forEach(v => groundedVariables.add(v));
-                                result2.allVars.forEach(v => totalVariables.add(v));
+                            const term = choice.comparatorTerm2().termOrInterval();
+                            if(term) {
+                                this.processTermOrInterval(term, this.usedPredicates, false);
+                                const result2 = this.collectVariablesFromTermOrInterval(term)
+                                if(result2.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    if(!hasNot)
+                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                }
                             }
                         }
+                    } else if(body_atom.conditional()) {
+                        const conditional = body_atom.conditional();
+                        const result = this.collectVariablesFromBodyConditional(conditional);
+                        contextVariables.push(result.conditionalVariables);
+                        groundedContextVariables.push(result.conditionalGroundedVariables);
+                        linkedContextVariables.push(result.conditionalLinkedVariables);
                     }
                 })
             }
         }
 
-        if(ctx.generalTerm()) {
-            const terms = ctx.generalTerm();
-            terms.forEach(term => {
-                this.processGeneralTerm(term, this.usedPredicates, false);
+        if(ctx.termOrInterval()) {
+            const terms = ctx.termOrInterval();
+            if(terms) {
+                terms.forEach(term => {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
 
-                const result = this.collectVariablesFromGeneralTerm(term);
+                    const result = this.collectVariablesFromTermOrInterval(term);
 
-                if(result.skip) {
-                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                    // As a result, we will simply skip these cases and not throw any errors.
-                } else {
-                    result.allVars.forEach(v => totalVariables.add(v));
-                }
-            });
+                    if(result.skip) {
+                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                        // As a result, we will simply skip these cases and not throw any errors.
+                    } else {
+                        result.allVars.forEach(v => totalVariables.add(v));
+                    }
+                });
+            }
         }
 
         this.constructTypes.push({
@@ -1828,11 +2516,6 @@ class VerboseASPListener extends ASPListener {
             indexStart: ctx.start.column,
             indexEnd: ctx.stop.column,
         });
-
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
 
         const result = Array.from(this.verifyUnsafeVariables(totalVariables, groundedVariables, linkedVariables, contextVariables, groundedContextVariables, linkedContextVariables));
         if(result.length > 0) {
@@ -1857,11 +2540,6 @@ class VerboseASPListener extends ASPListener {
             indexEnd: ctx.stop.column,
         });
 
-        if(!this.statementsByLine.has(ctx.start.line)) {
-            this.statementsByLine.set(ctx.start.line, []);
-        }
-        this.statementsByLine.get(ctx.start.line).push(ctx.getText());
-
         // Check for unsafe variables
         let totalVariables = new Set();
         let groundedVariables = new Set();
@@ -1874,10 +2552,10 @@ class VerboseASPListener extends ASPListener {
         if(ctx.show_terms()) {
             const show = ctx.show_terms();
 
-            const showTerm = show.generalTerm();
+            const showTerm = show.termOrInterval();
             if(showTerm) {
-                this.processGeneralTerm(showTerm, this.usedPredicates, false);
-                const result = this.collectVariablesFromGeneralTerm(showTerm);
+                this.processTermOrInterval(showTerm, this.usedPredicates, false);
+                const result = this.collectVariablesFromTermOrInterval(showTerm);
                 if(result.skip) {
                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
@@ -1895,23 +2573,26 @@ class VerboseASPListener extends ASPListener {
                         if(body_atom.literal()) {
                             const literal = body_atom.literal();
                             const hasNot = literal.NOT().length > 0;
-                            const terms = literal.classical_atom().atom().generalTerm();
-                            if(terms) {
-                                terms.forEach(term => {
-                                    const result = this.collectVariablesFromGeneralTerm(term);
-                                    if(result.skip) {
-                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                        // As a result, we will simply skip these cases and not throw any errors.
-                                    } else {
-                                        result.allVars.forEach(v => {
-                                            // Anonymous variables are not considered unsafe if used in a negative literal in the body of a rule
-                                            if(!v.startsWith('#Anon'))
-                                                totalVariables.add(v)
+                            const generalTerms = literal.classical_atom().atom().generalTerm();
+                            if(generalTerms) {
+                                generalTerms.forEach(generalTerms => {
+                                    const terms = generalTerms.termOrInterval();
+                                    if(terms) {
+                                        terms.forEach(term => {
+                                            const result = this.collectVariablesFromTermOrInterval(term);
+                                            if(result.skip) {
+                                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                                // As a result, we will simply skip these cases and not throw any errors.
+                                            } else {
+                                                result.allVars.forEach(v => {
+                                                    totalVariables.add(v)
+                                                });
+                                                if(!hasNot) {
+                                                    result.groundableVars.forEach(v => groundedVariables.add(v));
+                                                }
+                                            }
                                         });
-                                        if(!hasNot) {
-                                            result.groundableVars.forEach(v => groundedVariables.add(v));
-                                        }
                                     }
                                 });
                             }
@@ -1925,7 +2606,7 @@ class VerboseASPListener extends ASPListener {
                             result.linkedVars.forEach(linkedVar => linkedVariables.push(linkedVar));
                         } else if(body_atom.aggregate_atom_body()) {
                             const aggregate_atom = body_atom.aggregate_atom_body();
-                            const term = aggregate_atom.generalTerm();
+                            const term = aggregate_atom.termOrInterval();
                             if(term) {                                
                                 // Clingo only considers aggregate atoms' variables if there is a term of comparison in the aggregate
                                 // As a result, if there is no term, we do not need to consider the variables inside the aggregate for unsafety
@@ -1949,7 +2630,7 @@ class VerboseASPListener extends ASPListener {
                                 // {q(N,Z)} :- #count{V,X,Y: term(V,X,Y)}=q(N,Z).     It can even ground multiple variables, as long as NONE appear inside the aggregate
 
                                 const hasEquality = aggregate_atom.EQ() !== null || aggregate_atom.EQEQ() !== null;
-                                const termResult = this.collectVariablesFromGeneralTerm(term);
+                                const termResult = this.collectVariablesFromTermOrInterval(term);
 
                                 if(termResult.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -1971,50 +2652,62 @@ class VerboseASPListener extends ASPListener {
                             const hasNot = body_atom.NOT().length > 0;
                             const choice = body_atom.choice();
 
-                            if(choice.generalTerm()) {
-                                const terms = choice.generalTerm();
-                                terms.forEach(term => {
-                                    this.processGeneralTerm(term, this.usedPredicates, false);
-                                    const result = this.collectVariablesFromGeneralTerm(term)
-                                    if(result.skip) {
+                            if(choice.termOrInterval()) {
+                                const terms = choice.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        this.processTermOrInterval(term, this.usedPredicates, false);
+                                        const result = this.collectVariablesFromTermOrInterval(term)
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => totalVariables.add(v));
+                                        }
+                                    })
+                                }
+                            }
+
+                            if(choice.comparatorTerm1()) {
+                                const term = choice.comparatorTerm1().termOrInterval();
+                                if(term) {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result1 = this.collectVariablesFromTermOrInterval(term)
+                                    if(result1.skip) {
                                         // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                         // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                         // As a result, we will simply skip these cases and not throw any errors.
                                     } else {
-                                        result.allVars.forEach(v => totalVariables.add(v));
+                                        if(!hasNot)
+                                            result1.groundableVars.forEach(v => groundedVariables.add(v));
+                                        result1.allVars.forEach(v => totalVariables.add(v));
                                     }
-                                })
-                            }
-
-                            if(choice.comparatorTerm1()) {
-                                const term = choice.comparatorTerm1().generalTerm();
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result1 = this.collectVariablesFromGeneralTerm(term)
-                                if(result1.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    if(!hasNot)
-                                        result1.groundableVars.forEach(v => groundedVariables.add(v));
-                                    result1.allVars.forEach(v => totalVariables.add(v));
                                 }
                             }
 
                             if(choice.comparatorTerm2()) {
-                                const term = choice.comparatorTerm2().generalTerm();
-                                this.processGeneralTerm(term, this.usedPredicates, false);
-                                const result2 = this.collectVariablesFromGeneralTerm(term)
-                                if(result2.skip) {
-                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                    // As a result, we will simply skip these cases and not throw any errors.
-                                } else {
-                                    if(!hasNot)
-                                        result2.groundableVars.forEach(v => groundedVariables.add(v));
-                                    result2.allVars.forEach(v => totalVariables.add(v));
+                                const term = choice.comparatorTerm2().termOrInterval();
+                                if(term) {
+                                    this.processTermOrInterval(term, this.usedPredicates, false);
+                                    const result2 = this.collectVariablesFromTermOrInterval(term)
+                                    if(result2.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        if(!hasNot)
+                                            result2.groundableVars.forEach(v => groundedVariables.add(v));
+                                        result2.allVars.forEach(v => totalVariables.add(v));
+                                    }
                                 }
                             }
+                        } else if(body_atom.conditional()) {
+                            const conditional = body_atom.conditional();
+                            const result = this.collectVariablesFromBodyConditional(conditional);
+                            contextVariables.push(result.conditionalVariables);
+                            groundedContextVariables.push(result.conditionalGroundedVariables);
+                            linkedContextVariables.push(result.conditionalLinkedVariables);
                         }
                     })
                 }
@@ -2050,7 +2743,7 @@ class VerboseASPListener extends ASPListener {
                         hasArgs = true;
                         argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                     }
-                    const terms = atom.generalTerm();
+                    const generalTerms = atom.generalTerm();
 
                     const lineStart = atom.start.line;
                     const lineEnd = atom.stop.line;
@@ -2117,11 +2810,182 @@ class VerboseASPListener extends ASPListener {
                         this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
                     }
 
-                    if(terms) {
-                        terms.forEach(term => {
-                            this.processGeneralTerm(term, this.usedPredicates, true);
+                    if(generalTerms) {
+                        generalTerms.forEach(generalTerm => {
+                            const terms = generalTerm.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, true); 
+                                });
+                            }
                         });
                     }
+                } else if (headAtom.conditional()) {
+                    const conditional = headAtom.conditional();
+                    const head_atom = conditional.head_condition_atom();
+                    const body_atoms = conditional.body_condition_atom();
+
+                    if(head_atom) {
+                        if(head_atom.literal()) {
+                            const atom = head_atom.literal().classical_atom().atom();
+                            if (!atom || !atom.start || !atom.stop) return;
+                            const predicateName = atom.CONSTANT().getText();
+                            const atomText = atom.getText();
+                            let hasArgs = false;
+                            let argsText;
+                            if(atomText.indexOf('(') != -1) {
+                                hasArgs = true;
+                                argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                            }
+
+                            const lineStart = atom.start.line;
+                            const lineEnd = atom.stop.line;
+                            const indexStart = atom.start.column;
+                            let indexEnd = atom.stop.column;
+
+                            if(indexEnd == indexStart) {
+                                indexEnd += predicateName.length;
+                            }
+
+                            if(hasArgs) {
+                                const arities = new Set();
+                                let nest = 0;
+                                let arity = 0;
+                                let hasToken = false;
+                                let lastNonWS = '';
+
+                                for (let i = 0; i < argsText.length; i++) {
+                                    const ch = argsText[i];
+                                    if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                    if (ch === '(') {
+                                        nest++;
+                                    } else if (ch === ')') {
+                                        nest--;
+                                    } else if (ch === ',' && nest === 0) {
+                                        arity++;
+                                        hasToken = false;
+                                    } else if (ch === ';' && nest === 0) {
+                                        arities.add(hasToken ? arity + 1 : arity);
+                                        hasToken = false;
+                                        arity = 0;
+                                    } else if (ch.trim() !== '') {
+                                        hasToken = true;
+                                    }
+                                }
+
+                                if (hasToken || arity > 0) {
+                                    arities.add(arity + (hasToken ? 1 : 0));
+                                } else if (lastNonWS === ';') {
+                                    arities.add(0);
+                                }
+
+                                if(arities.size == 0) {
+                                    const predicateKey = `${predicateName}/0`;
+                                    if (!this.definedPredicates.has(predicateKey)) {
+                                        this.definedPredicates.set(predicateKey, []);
+                                    }
+                                    this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                } else {
+                                    arities.forEach(arity => {
+                                        const predicateKey = `${predicateName}/${arity}`;
+                                        if (!this.definedPredicates.has(predicateKey)) {
+                                            this.definedPredicates.set(predicateKey, []);
+                                        }
+                                        this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                    })
+                                }
+                            } else {
+                                const predicateKey = `${predicateName}/0`
+                                if (!this.definedPredicates.has(predicateKey)) {
+                                    this.definedPredicates.set(predicateKey, []);
+                                }
+                                this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                            }
+                        }
+                    }
+                    
+                    if(body_atoms) {
+                        body_atoms.forEach(body_atom => {
+                            if(body_atom.literal()) {
+                                const atom = body_atom.literal().classical_atom().atom();
+                                if (!atom || !atom.start || !atom.stop) return;
+                                const predicateName = atom.CONSTANT().getText();
+                                const atomText = atom.getText();
+                                let hasArgs = false;
+                                let argsText;
+                                if(atomText.indexOf('(') != -1) {
+                                    hasArgs = true;
+                                    argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                                }
+
+                                const lineStart = atom.start.line;
+                                const lineEnd = atom.stop.line;
+                                const indexStart = atom.start.column;
+                                let indexEnd = atom.stop.column;
+
+                                if(indexEnd == indexStart) {
+                                    indexEnd += predicateName.length;
+                                }
+
+                                if(hasArgs) {
+                                    const arities = new Set();
+                                    let nest = 0;
+                                    let arity = 0;
+                                    let hasToken = false;
+                                    let lastNonWS = '';
+
+                                    for (let i = 0; i < argsText.length; i++) {
+                                        const ch = argsText[i];
+                                        if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                        if (ch === '(') {
+                                            nest++;
+                                        } else if (ch === ')') {
+                                            nest--;
+                                        } else if (ch === ',' && nest === 0) {
+                                            arity++;
+                                            hasToken = false;
+                                        } else if (ch === ';' && nest === 0) {
+                                            arities.add(hasToken ? arity + 1 : arity);
+                                            hasToken = false;
+                                            arity = 0;
+                                        } else if (ch.trim() !== '') {
+                                            hasToken = true;
+                                        }
+                                    }
+
+                                    if (hasToken || arity > 0) {
+                                        arities.add(arity + (hasToken ? 1 : 0));
+                                    } else if (lastNonWS === ';') {
+                                        arities.add(0);
+                                    }
+
+                                    if(arities.size == 0) {
+                                        const predicateKey = `${predicateName}/0`;
+                                        if (!this.usedPredicates.has(predicateKey)) {
+                                            this.usedPredicates.set(predicateKey, []);
+                                        }
+                                        this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                    } else {
+                                        arities.forEach(arity => {
+                                            const predicateKey = `${predicateName}/${arity}`;
+                                            if (!this.usedPredicates.has(predicateKey)) {
+                                                this.usedPredicates.set(predicateKey, []);
+                                            }
+                                            this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                        })
+                                    }
+                                } else {
+                                    const predicateKey = `${predicateName}/0`
+                                    if (!this.usedPredicates.has(predicateKey)) {
+                                        this.usedPredicates.set(predicateKey, []);
+                                    }
+                                    this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                }
+                            }
+                        });
+                    }                  
                 }
             });
         }
@@ -2144,7 +3008,7 @@ class VerboseASPListener extends ASPListener {
                         hasArgs = true;
                         argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                     }
-                    const terms = atom.generalTerm();
+                    const generalTerms = atom.generalTerm();
 
                     const lineStart = atom.start.line;
                     const lineEnd = atom.stop.line;
@@ -2211,9 +3075,14 @@ class VerboseASPListener extends ASPListener {
                         this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
                     }
 
-                    if(terms) {
-                        terms.forEach(term => {
-                            this.processGeneralTerm(term, this.usedPredicates, true);
+                    if(generalTerms) {
+                        generalTerms.forEach(generalTerm => {
+                            const terms = generalTerm.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, true);
+                                });
+                            }
                         });
                     }
                 } else if (bodyAtom.choice()) {
@@ -2384,34 +3253,209 @@ class VerboseASPListener extends ASPListener {
                             });
                         });
                     }
-                } 
+                } else if (bodyAtom.conditional()) {
+                    const conditional = bodyAtom.conditional();
+                    const head_atom = conditional.head_condition_atom();
+                    const body_atoms = conditional.body_condition_atom();
+
+                    if(head_atom) {
+                        if(head_atom.literal()) {
+                            const atom = head_atom.literal().classical_atom().atom();
+                            if (!atom || !atom.start || !atom.stop) return;
+                            const predicateName = atom.CONSTANT().getText();
+                            const atomText = atom.getText();
+                            let hasArgs = false;
+                            let argsText;
+                            if(atomText.indexOf('(') != -1) {
+                                hasArgs = true;
+                                argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                            }
+
+                            const lineStart = atom.start.line;
+                            const lineEnd = atom.stop.line;
+                            const indexStart = atom.start.column;
+                            let indexEnd = atom.stop.column;
+
+                            if(indexEnd == indexStart) {
+                                indexEnd += predicateName.length;
+                            }
+
+                            if(hasArgs) {
+                                const arities = new Set();
+                                let nest = 0;
+                                let arity = 0;
+                                let hasToken = false;
+                                let lastNonWS = '';
+
+                                for (let i = 0; i < argsText.length; i++) {
+                                    const ch = argsText[i];
+                                    if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                    if (ch === '(') {
+                                        nest++;
+                                    } else if (ch === ')') {
+                                        nest--;
+                                    } else if (ch === ',' && nest === 0) {
+                                        arity++;
+                                        hasToken = false;
+                                    } else if (ch === ';' && nest === 0) {
+                                        arities.add(hasToken ? arity + 1 : arity);
+                                        hasToken = false;
+                                        arity = 0;
+                                    } else if (ch.trim() !== '') {
+                                        hasToken = true;
+                                    }
+                                }
+
+                                if (hasToken || arity > 0) {
+                                    arities.add(arity + (hasToken ? 1 : 0));
+                                } else if (lastNonWS === ';') {
+                                    arities.add(0);
+                                }
+
+                                if(arities.size == 0) {
+                                    const predicateKey = `${predicateName}/0`;
+                                    if (!this.usedPredicates.has(predicateKey)) {
+                                        this.usedPredicates.set(predicateKey, []);
+                                    }
+                                    this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                } else {
+                                    arities.forEach(arity => {
+                                        const predicateKey = `${predicateName}/${arity}`;
+                                        if (!this.usedPredicates.has(predicateKey)) {
+                                            this.usedPredicates.set(predicateKey, []);
+                                        }
+                                        this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                    })
+                                }
+                            } else {
+                                const predicateKey = `${predicateName}/0`
+                                if (!this.usedPredicates.has(predicateKey)) {
+                                    this.usedPredicates.set(predicateKey, []);
+                                }
+                                this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                            }
+                        }
+                    }
+                    
+                    if(body_atoms) {
+                        body_atoms.forEach(body_atom => {
+                            if(body_atom.literal()) {
+                                const atom = body_atom.literal().classical_atom().atom();
+                                if (!atom || !atom.start || !atom.stop) return;
+                                const predicateName = atom.CONSTANT().getText();
+                                const atomText = atom.getText();
+                                let hasArgs = false;
+                                let argsText;
+                                if(atomText.indexOf('(') != -1) {
+                                    hasArgs = true;
+                                    argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                                }
+
+                                const lineStart = atom.start.line;
+                                const lineEnd = atom.stop.line;
+                                const indexStart = atom.start.column;
+                                let indexEnd = atom.stop.column;
+
+                                if(indexEnd == indexStart) {
+                                    indexEnd += predicateName.length;
+                                }
+
+                                if(hasArgs) {
+                                    const arities = new Set();
+                                    let nest = 0;
+                                    let arity = 0;
+                                    let hasToken = false;
+                                    let lastNonWS = '';
+
+                                    for (let i = 0; i < argsText.length; i++) {
+                                        const ch = argsText[i];
+                                        if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                        if (ch === '(') {
+                                            nest++;
+                                        } else if (ch === ')') {
+                                            nest--;
+                                        } else if (ch === ',' && nest === 0) {
+                                            arity++;
+                                            hasToken = false;
+                                        } else if (ch === ';' && nest === 0) {
+                                            arities.add(hasToken ? arity + 1 : arity);
+                                            hasToken = false;
+                                            arity = 0;
+                                        } else if (ch.trim() !== '') {
+                                            hasToken = true;
+                                        }
+                                    }
+
+                                    if (hasToken || arity > 0) {
+                                        arities.add(arity + (hasToken ? 1 : 0));
+                                    } else if (lastNonWS === ';') {
+                                        arities.add(0);
+                                    }
+
+                                    if(arities.size == 0) {
+                                        const predicateKey = `${predicateName}/0`;
+                                        if (!this.usedPredicates.has(predicateKey)) {
+                                            this.usedPredicates.set(predicateKey, []);
+                                        }
+                                        this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                    } else {
+                                        arities.forEach(arity => {
+                                            const predicateKey = `${predicateName}/${arity}`;
+                                            if (!this.usedPredicates.has(predicateKey)) {
+                                                this.usedPredicates.set(predicateKey, []);
+                                            }
+                                            this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                        })
+                                    }
+                                } else {
+                                    const predicateKey = `${predicateName}/0`
+                                    if (!this.usedPredicates.has(predicateKey)) {
+                                        this.usedPredicates.set(predicateKey, []);
+                                    }
+                                    this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                }
+                            }
+                        });
+                    }                    
+                }
             });
         }
     }
 
     enterBuiltIn_atom(ctx) {
-        if(ctx.generalTerm()) {
-            const terms = ctx.generalTerm();
-            terms.forEach(term => {
-                this.processGeneralTerm(term, this.usedPredicates, false);
-            });
+        if(ctx.termOrInterval()) {
+            const terms = ctx.termOrInterval();
+            if(terms) {
+                terms.forEach(term => {
+                    this.processTermOrInterval(term, this.usedPredicates, false);
+                });
+            }
         }
     }
 
     enterAggregate_atom_head(ctx) {
         if (!ctx.start || !ctx.stop) return;
 
-        if(ctx.generalTerm()) {
-            const term = ctx.generalTerm();
-            this.processGeneralTerm(term, this.usedPredicates, false);
+        if(ctx.termOrInterval()) {
+            const term = ctx.termOrInterval();
+            if(term) {
+                this.processTermOrInterval(term, this.usedPredicates, false);
+            }
         }
 
         const aggregate_elements = ctx.aggregate_element_head();
         aggregate_elements.forEach(aggregateElement => {
             if(aggregateElement.generalTerm()) {
-                const terms = aggregateElement.generalTerm();
-                terms.forEach(term => {
-                    this.processGeneralTerm(term, this.usedPredicates, false);
+                const generalTerms = aggregateElement.generalTerm();
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            this.processTermOrInterval(term, this.usedPredicates, false);
+                        });
+                    }
                 });
             }
 
@@ -2428,7 +3472,7 @@ class VerboseASPListener extends ASPListener {
                         hasArgs = true;
                         argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                     }
-                    const terms = atom.generalTerm();
+                    const generalTerms = atom.generalTerm();
 
                     const lineStart = atom.start.line;
                     const lineEnd = atom.stop.line;
@@ -2495,32 +3539,208 @@ class VerboseASPListener extends ASPListener {
                         this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
                     }
 
-                    if(terms) {
-                        terms.forEach(term => {
-                            this.processGeneralTerm(term, this.usedPredicates, true);
+                    if(generalTerms) {
+                        generalTerms.forEach(generalTerm => {
+                            const terms = generalTerm.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    this.processTermOrInterval(term, this.usedPredicates, true);
+                                });
+                            }
                         });
                     }
                 }
-            }
+            } else if(aggregateElement.conditional()) {
+                const conditional = aggregateElement.conditional();
+                const head_atom = conditional.head_condition_atom();
+                const body_atoms = conditional.body_condition_atom();
 
+                if(head_atom) {
+                    if(head_atom.literal()) {
+                        const atom = head_atom.literal().classical_atom().atom();
+                        if (!atom || !atom.start || !atom.stop) return;
+                        const predicateName = atom.CONSTANT().getText();
+                        const atomText = atom.getText();
+                        let hasArgs = false;
+                        let argsText;
+                        if(atomText.indexOf('(') != -1) {
+                            hasArgs = true;
+                            argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                        }
+
+                        const lineStart = atom.start.line;
+                        const lineEnd = atom.stop.line;
+                        const indexStart = atom.start.column;
+                        let indexEnd = atom.stop.column;
+
+                        if(indexEnd == indexStart) {
+                            indexEnd += predicateName.length;
+                        }
+
+                        if(hasArgs) {
+                            const arities = new Set();
+                            let nest = 0;
+                            let arity = 0;
+                            let hasToken = false;
+                            let lastNonWS = '';
+
+                            for (let i = 0; i < argsText.length; i++) {
+                                const ch = argsText[i];
+                                if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                if (ch === '(') {
+                                    nest++;
+                                } else if (ch === ')') {
+                                    nest--;
+                                } else if (ch === ',' && nest === 0) {
+                                    arity++;
+                                    hasToken = false;
+                                } else if (ch === ';' && nest === 0) {
+                                    arities.add(hasToken ? arity + 1 : arity);
+                                    hasToken = false;
+                                    arity = 0;
+                                } else if (ch.trim() !== '') {
+                                    hasToken = true;
+                                }
+                            }
+
+                            if (hasToken || arity > 0) {
+                                arities.add(arity + (hasToken ? 1 : 0));
+                            } else if (lastNonWS === ';') {
+                                arities.add(0);
+                            }
+
+                            if(arities.size == 0) {
+                                const predicateKey = `${predicateName}/0`;
+                                if (!this.definedPredicates.has(predicateKey)) {
+                                    this.definedPredicates.set(predicateKey, []);
+                                }
+                                this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                            } else {
+                                arities.forEach(arity => {
+                                    const predicateKey = `${predicateName}/${arity}`;
+                                    if (!this.definedPredicates.has(predicateKey)) {
+                                        this.definedPredicates.set(predicateKey, []);
+                                    }
+                                    this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                })
+                            }
+                        } else {
+                            const predicateKey = `${predicateName}/0`
+                            if (!this.definedPredicates.has(predicateKey)) {
+                                this.definedPredicates.set(predicateKey, []);
+                            }
+                            this.definedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                        }
+                    }
+                }
+                
+                if(body_atoms) {
+                    body_atoms.forEach(body_atom => {
+                        if(body_atom.literal()) {
+                            const atom = body_atom.literal().classical_atom().atom();
+                            if (!atom || !atom.start || !atom.stop) return;
+                            const predicateName = atom.CONSTANT().getText();
+                            const atomText = atom.getText();
+                            let hasArgs = false;
+                            let argsText;
+                            if(atomText.indexOf('(') != -1) {
+                                hasArgs = true;
+                                argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
+                            }
+
+                            const lineStart = atom.start.line;
+                            const lineEnd = atom.stop.line;
+                            const indexStart = atom.start.column;
+                            let indexEnd = atom.stop.column;
+
+                            if(indexEnd == indexStart) {
+                                indexEnd += predicateName.length;
+                            }
+
+                            if(hasArgs) {
+                                const arities = new Set();
+                                let nest = 0;
+                                let arity = 0;
+                                let hasToken = false;
+                                let lastNonWS = '';
+
+                                for (let i = 0; i < argsText.length; i++) {
+                                    const ch = argsText[i];
+                                    if (!/\s/.test(ch)) lastNonWS = ch;
+
+                                    if (ch === '(') {
+                                        nest++;
+                                    } else if (ch === ')') {
+                                        nest--;
+                                    } else if (ch === ',' && nest === 0) {
+                                        arity++;
+                                        hasToken = false;
+                                    } else if (ch === ';' && nest === 0) {
+                                        arities.add(hasToken ? arity + 1 : arity);
+                                        hasToken = false;
+                                        arity = 0;
+                                    } else if (ch.trim() !== '') {
+                                        hasToken = true;
+                                    }
+                                }
+
+                                if (hasToken || arity > 0) {
+                                    arities.add(arity + (hasToken ? 1 : 0));
+                                } else if (lastNonWS === ';') {
+                                    arities.add(0);
+                                }
+
+                                if(arities.size == 0) {
+                                    const predicateKey = `${predicateName}/0`;
+                                    if (!this.usedPredicates.has(predicateKey)) {
+                                        this.usedPredicates.set(predicateKey, []);
+                                    }
+                                    this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                } else {
+                                    arities.forEach(arity => {
+                                        const predicateKey = `${predicateName}/${arity}`;
+                                        if (!this.usedPredicates.has(predicateKey)) {
+                                            this.usedPredicates.set(predicateKey, []);
+                                        }
+                                        this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                                    })
+                                }
+                            } else {
+                                const predicateKey = `${predicateName}/0`
+                                if (!this.usedPredicates.has(predicateKey)) {
+                                    this.usedPredicates.set(predicateKey, []);
+                                }
+                                this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
+                            }
+                        }
+                    });
+                }
+            }
         });
-        
     }
 
     enterAggregate_atom_body(ctx) {
         if (!ctx.start || !ctx.stop) return;
 
-        if(ctx.generalTerm()) {
-            const term = ctx.generalTerm();
-            this.processGeneralTerm(term, this.usedPredicates, false);
+        if(ctx.termOrInterval()) {
+            const term = ctx.termOrInterval();
+            if(term) {
+                this.processTermOrInterval(term, this.usedPredicates, false);
+            }
         }
 
         const aggregate_elements = ctx.aggregate_element_body();
         aggregate_elements.forEach(aggregateElement => {
             if(aggregateElement.generalTerm()) {
-                const terms = aggregateElement.generalTerm();
-                terms.forEach(term => {
-                    this.processGeneralTerm(term, this.usedPredicates, false);
+                const generalTerms = aggregateElement.generalTerm();
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            this.processTermOrInterval(term, this.usedPredicates, false);
+                        });
+                    }
                 });
             }
 
@@ -2538,7 +3758,7 @@ class VerboseASPListener extends ASPListener {
                             hasArgs = true;
                             argsText = atomText.slice(atomText.indexOf('(') + 1, atomText.length - 1)
                         }
-                        const terms = atom.generalTerm();
+                        const generalTerms = atom.generalTerm();
 
                         const lineStart = atom.start.line;
                         const lineEnd = atom.stop.line;
@@ -2605,9 +3825,14 @@ class VerboseASPListener extends ASPListener {
                             this.usedPredicates.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
                         }
 
-                        if(terms) {
-                            terms.forEach(term => {
-                                this.processGeneralTerm(term, this.usedPredicates, true);
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval();
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        this.processTermOrInterval(term, this.usedPredicates, true);
+                                    });
+                                }
                             });
                         }
                     }
@@ -2636,19 +3861,21 @@ class VerboseASPListener extends ASPListener {
         this.hasUnclosedComment = true;
     }
 
-    processGeneralTerm(generalTerm, predicateMap, isArgument) {
-        if (!generalTerm || !generalTerm.start || !generalTerm.stop) return;
+    processTermOrInterval(termOrInterval, predicateMap, isArgument) {
+        if (!termOrInterval || !termOrInterval.start || !termOrInterval.stop) return;
 
-        if(generalTerm.interval()) {
-            const terms = generalTerm.interval().term();
+        if(termOrInterval.interval()) {
+            const terms = termOrInterval.interval().term();
             if(terms) {
                 terms.forEach(term => {
                     this.processTerm(term, predicateMap, isArgument);
                 });
             }
-        } else if(generalTerm.term()) {
-            const term = generalTerm.term();
-            this.processTerm(term, predicateMap, isArgument);
+        } else if(termOrInterval.term()) {
+            const term = termOrInterval.term();
+            if(term) {
+                this.processTerm(term, predicateMap, isArgument);
+            }
         }
     }
 
@@ -2689,7 +3916,15 @@ class VerboseASPListener extends ASPListener {
                                     } else if (unaryTerm.tuple()) {
                                         this.processTuple(unaryTerm.tuple(), predicateMap);
                                     } else if (unaryTerm.generalTerm()) {
-                                        this.processGeneralTerm(unaryTerm.generalTerm(), predicateMap, isArgument);
+                                        const generalTerms = unaryTerm.generalTerm();
+                                        generalTerms.forEach(generalTerm => {
+                                            const terms = generalTerm.termOrInterval();
+                                            if(terms) {
+                                                terms.forEach(term => {
+                                                    this.processTermOrInterval(term, predicateMap, isArgument);
+                                                });
+                                            }
+                                        });
                                     }
                                 });
                             }
@@ -2704,7 +3939,7 @@ class VerboseASPListener extends ASPListener {
     processFunctionTerm(functionTerm, predicateMap) {
         if (!functionTerm || !functionTerm.start || !functionTerm.stop) return;
         const predicateName = functionTerm.CONSTANT().getText();
-        const terms = functionTerm.generalTerm();
+        const generalTerms = functionTerm.generalTerm();
         const functionTermText = functionTerm.getText();
         let hasArgs = false;
         let argsText;
@@ -2739,9 +3974,14 @@ class VerboseASPListener extends ASPListener {
             predicateMap.get(predicateKey).push({ lineStart, lineEnd, indexStart, indexEnd });
         }
     
-        if(terms) {
-            terms.forEach(term => {
-                this.processGeneralTerm(term, predicateMap, true);
+        if(generalTerms) {
+            generalTerms.forEach(generalTerm => {
+                const terms = generalTerm.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, predicateMap, true);
+                    });
+                }
             });
         }
     }
@@ -2751,19 +3991,24 @@ class VerboseASPListener extends ASPListener {
         if (!tuple) return;
         
         if(tuple.generalTerm()) {
-            const terms = tuple.generalTerm();
+            const generalTerms = tuple.generalTerm();
         
-            terms.forEach(term => {
-                this.processGeneralTerm(term, predicateMap, true);
+            generalTerms.forEach(generalTerm => {
+                const terms = generalTerm.termOrInterval();
+                if(terms) {
+                    terms.forEach(term => {
+                        this.processTermOrInterval(term, predicateMap, true);
+                    });
+                }
             });
         }
     }
 
-    collectVariablesFromGeneralTerm(generalTerm) {
-        if(!generalTerm || generalTerm.getText() == '') return {allVars: new Set(), groundableVars: new Set(), skip: false, hasNonAritmethicValue: false};
+    collectVariablesFromTermOrInterval(termOrInterval) {
+        if(!termOrInterval || termOrInterval.getText() == '') return {allVars: new Set(), groundableVars: new Set(), skip: false, hasNonAritmethicValue: false};
 
-        if(generalTerm.interval()) {
-            const terms = generalTerm.interval().term();
+        if(termOrInterval.interval()) {
+            const terms = termOrInterval.interval().term();
             let allVars = [];
             let groundableVars = new Set();
             let skip = false;
@@ -2794,8 +4039,8 @@ class VerboseASPListener extends ASPListener {
                 }
             }
                 
-        } else if(generalTerm.term()) {
-            const term = generalTerm.term();
+        } else if(termOrInterval.term()) {
+            const term = termOrInterval.term();
             const result = this.collectVariablesFromTerm(term);
             return result;
         }
@@ -2907,38 +4152,53 @@ class VerboseASPListener extends ASPListener {
             }
         } else if(unaryTerm.functionTerm()) {
             const functionTerm = unaryTerm.functionTerm();
-            const terms = functionTerm.generalTerm();
-            if(terms) {
-                terms.forEach(t => {
-                    const result = this.collectVariablesFromGeneralTerm(t);
-                    result.allVars.forEach(v => allVars.push(v));
-                    result.groundableVars.forEach(v => groundableVars.add(v));
+            const generalTerms = functionTerm.generalTerm();
+            if(generalTerms) {
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            const result = this.collectVariablesFromTermOrInterval(term);
+                            result.allVars.forEach(v => allVars.push(v));
+                            result.groundableVars.forEach(v => groundableVars.add(v));
+                        });
+                    }
                 });
             }
         } else if(unaryTerm.tuple()) {
             const tuple = unaryTerm.tuple();
-            const terms = tuple.generalTerm();
-            if(terms) {
-                terms.forEach(t => {
-                    const result = this.collectVariablesFromGeneralTerm(t);
-                    result.allVars.forEach(v => allVars.push(v));
-                    result.groundableVars.forEach(v => groundableVars.add(v));
-                    if(result.hasNonGroundableOperator)
-                        hasNonGroundableOperator = true
-                    if(result.skip)
-                        skip = result.skip
+            const generalTerms = tuple.generalTerm();
+            if(generalTerms) {
+                generalTerms.forEach(generalTerm => {
+                    const terms = generalTerm.termOrInterval();
+                    if(terms) {
+                        terms.forEach(term => {
+                            const result = this.collectVariablesFromTermOrInterval(term);
+                            result.allVars.forEach(v => allVars.push(v));
+                            result.groundableVars.forEach(v => groundableVars.add(v));
+                            if(result.hasNonGroundableOperator)
+                                hasNonGroundableOperator = true
+                            if(result.skip)
+                                skip = result.skip
+                        });
+                    }
                 });
             }
         } else if(unaryTerm.generalTerm()) {
-            const innerTerm = unaryTerm.generalTerm();
-            const result = this.collectVariablesFromGeneralTerm(innerTerm);
+            const generalTerm = unaryTerm.generalTerm();
+            const terms = generalTerm.termOrInterval();
+            if(terms) {
+                terms.forEach(term => {
+                const result = this.collectVariablesFromTermOrInterval(term);
 
-            result.allVars.forEach(v => allVars.push(v));
-            result.groundableVars.forEach(v => groundableVars.add(v));
+                    result.allVars.forEach(v => allVars.push(v));
+                    result.groundableVars.forEach(v => groundableVars.add(v));
 
-            hasNonGroundableOperator = result.hasNonGroundableOperator;
-            isArithmeticValue = !result.hasNonArithmeticValue;
-            skip = result.skip;
+                    hasNonGroundableOperator = result.hasNonGroundableOperator;
+                    isArithmeticValue = !result.hasNonArithmeticValue;
+                    skip = result.skip; 
+                });
+            }
         }
 
         return {allVars: allVars, groundableVars: groundableVars, isArithmeticValue: isArithmeticValue, skip: skip, hasNonGroundableOperator: hasNonGroundableOperator};
@@ -2984,11 +4244,11 @@ class VerboseASPListener extends ASPListener {
         let groundedVars = new Set();
         let linkedVars = [];
 
-        const term1 = builtIn_atom.generalTerm(0);
-        const term2 = builtIn_atom.generalTerm(1);
+        const term1 = builtIn_atom.termOrInterval(0);
+        const term2 = builtIn_atom.termOrInterval(1);
         
-        const result1 = this.collectVariablesFromGeneralTerm(term1);
-        const result2 = this.collectVariablesFromGeneralTerm(term2);
+        const result1 = this.collectVariablesFromTermOrInterval(term1);
+        const result2 = this.collectVariablesFromTermOrInterval(term2);
 
         if(result1.skip || result2.skip) {
             // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
@@ -3037,33 +4297,43 @@ class VerboseASPListener extends ASPListener {
         if(aggregate_atom.aggregate_element_head()) {
             const aggregate_elements = aggregate_atom.aggregate_element_head();
             aggregate_elements.forEach(aggregateElement => {
-                const terms = aggregateElement.generalTerm();
-                if(terms) {
-                    terms.forEach(term => {
-                        const result = this.collectVariablesFromGeneralTerm(term);
-                        if(result.skip) {
-                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                            // As a result, we will simply skip these cases and not throw any errors.
-                        } else {
-                            result.allVars.forEach(v => aggregateVariables.add(v));
-                        }
-                    });
-                }
-
-                const aggregateLiteral = aggregateElement.aggregate_literal();
-                if(aggregateLiteral) {
-                    if(aggregateLiteral.literal()) {
-                        const terms = aggregateLiteral.literal().classical_atom().atom().generalTerm();
+                const generalTerms = aggregateElement.generalTerm();
+                if(generalTerms) {
+                    generalTerms.forEach(generalTerm => {
+                        const terms = generalTerm.termOrInterval();
                         if(terms) {
                             terms.forEach(term => {
-                                const result = this.collectVariablesFromGeneralTerm(term);
+                                const result = this.collectVariablesFromTermOrInterval(term);
                                 if(result.skip) {
                                     // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
                                     // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
                                     // As a result, we will simply skip these cases and not throw any errors.
                                 } else {
                                     result.allVars.forEach(v => aggregateVariables.add(v));
+                                }
+                            });
+                        }
+                    });
+                }
+
+                if(aggregateElement.aggregate_literal()) {
+                    const aggregateLiteral = aggregateElement.aggregate_literal()
+                    if(aggregateLiteral.literal()) {
+                        const generalTerms = aggregateLiteral.literal().classical_atom().atom().generalTerm();
+                        if(generalTerms) {
+                            generalTerms.forEach(generalTerm => {
+                                const terms = generalTerm.termOrInterval()
+                                if(terms) {
+                                    terms.forEach(term => {
+                                        const result = this.collectVariablesFromTermOrInterval(term);
+                                        if(result.skip) {
+                                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                            // As a result, we will simply skip these cases and not throw any errors.
+                                        } else {
+                                            result.allVars.forEach(v => aggregateVariables.add(v));
+                                        } 
+                                    });
                                 }
                             });
                         }
@@ -3077,6 +4347,12 @@ class VerboseASPListener extends ASPListener {
                         result.groundedVars.forEach(v => aggregateGroundedVariables.add(v));
                         result.linkedVars.forEach(linkedVar => aggregateLinkedVariables.push(linkedVar));
                     }
+                } else if(aggregateElement.conditional()) {
+                    const conditional = aggregateElement.conditional();
+                    const result = this.collectVariablesFromHeadConditional(conditional);
+                    result.conditionalVariables.forEach(v => aggregateVariables.add(v));
+                    result.conditionalGroundedVariables.forEach(v => aggregateGroundedVariables.add(v));
+                    result.conditionalLinkedVariables.forEach(v => aggregateLinkedVariables.push(v));
                 }
             });
         }
@@ -3094,16 +4370,21 @@ class VerboseASPListener extends ASPListener {
         if(aggregate_atom.aggregate_element_body()) {
             const aggregate_elements = aggregate_atom.aggregate_element_body();
             aggregate_elements.forEach(aggregateElement => {
-                const terms = aggregateElement.generalTerm();
-                if(terms) {
-                    terms.forEach(term => {
-                        const result = this.collectVariablesFromGeneralTerm(term);
-                        if(result.skip) {
-                            // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                            // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                            // As a result, we will simply skip these cases and not throw any errors.
-                        } else {
-                            result.allVars.forEach(v => aggregateVariables.add(v));
+                const generalTerms = aggregateElement.generalTerm();
+                if(generalTerms) {
+                    generalTerms.forEach(generalTerm => {
+                        const terms = generalTerm.termOrInterval();
+                        if(terms) {
+                            terms.forEach(term => {
+                                const result = this.collectVariablesFromTermOrInterval(term);
+                                if(result.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    result.allVars.forEach(v => aggregateVariables.add(v));
+                                } 
+                            });
                         }
                     });
                 }
@@ -3114,19 +4395,24 @@ class VerboseASPListener extends ASPListener {
                         if(aggregateLiteral.literal()) {
                             const literal = aggregateLiteral.literal();
                             const hasNot = literal.NOT().length > 0;
-                            const terms = literal.classical_atom().atom().generalTerm();
-                            if(terms) {
-                                terms.forEach(term => {
-                                    const result = this.collectVariablesFromGeneralTerm(term);
-                                    if(result.skip) {
-                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
-                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
-                                        // As a result, we will simply skip these cases and not throw any errors.
-                                    } else {
-                                        result.allVars.forEach(v => aggregateVariables.add(v));
-                                        if(!hasNot) {
-                                            result.groundableVars.forEach(v => aggregateGroundedVariables.add(v))
-                                        }
+                            const generalTerms = literal.classical_atom().atom().generalTerm();
+                            if(generalTerms) {
+                                generalTerms.forEach(generalTerm => {
+                                    const terms = generalTerm.termOrInterval();
+                                    if(terms) {
+                                        terms.forEach(term => {
+                                            const result = this.collectVariablesFromTermOrInterval(term);
+                                            if(result.skip) {
+                                                // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                                // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                                // As a result, we will simply skip these cases and not throw any errors.
+                                            } else {
+                                                result.allVars.forEach(v => aggregateVariables.add(v));
+                                                if(!hasNot) {
+                                                    result.groundableVars.forEach(v => aggregateGroundedVariables.add(v))
+                                                }
+                                            } 
+                                        });
                                     }
                                 });
                             }
@@ -3146,6 +4432,232 @@ class VerboseASPListener extends ASPListener {
         }
 
         return {aggregateVariables, aggregateGroundedVariables, aggregateLinkedVariables};
+    }
+
+    collectVariablesFromHeadConditional(conditional) {
+        let conditionalVariables = new Set();
+        let conditionalGroundedVariables = new Set();
+        let conditionalLinkedVariables = [];
+
+        const head_atom = conditional.head_condition_atom();
+        const body_atoms = conditional.body_condition_atom();
+
+        // For each variable X in a conditional literal L0 : L1,...,Ln
+        // ├─ Is this conditional literal in the HEAD of the rule?
+        // │  │
+        // │  └─ Does X occur anywhere in the condition L1,...,Ln?
+        // │     ├─ NO  → UNSAFE (heads never supply their own domain — X must come from the condition, no exceptions here)
+        // │     │
+        // │     └─ YES → Is at least one of those occurrences POSITIVE (not under "not")?
+        // │              ├─ YES → safe
+        // │              └─ NO  → UNSAFE (negation never binds)
+        // │
+        // └─ Is this conditional literal in the BODY of the rule?
+        //    │
+        //    └─ Does X occur anywhere in the condition L1,...,Ln?
+        //       ├─ YES → Is at least one of those occurrences POSITIVE?
+        //       │        ├─ YES → safe
+        //       │        └─ NO  → UNSAFE (negation never binds)
+        //       │
+        //       └─ NO  → Is L0 itself POSITIVE (not "not L0")?
+        //                ├─ YES → safe (L0's own predicate extension becomes X's domain)
+        //                └─ NO  → UNSAFE (L0 negated, nothing left to bind X)
+
+        if(head_atom) {
+            if(head_atom.literal()) {
+                const literal = head_atom.literal();
+                const generalTerms = literal.classical_atom().atom().generalTerm();
+                if(generalTerms) {
+                    generalTerms.forEach(generalTerm => {
+                        const terms = generalTerm.termOrInterval();
+                        if(terms) {
+                            terms.forEach(term => {
+                                const result = this.collectVariablesFromTermOrInterval(term);
+                                if(result.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    result.allVars.forEach(v => {
+                                        conditionalVariables.add(v)
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+            } else if(head_atom.builtIn_atom()) {
+                const isNegated = head_atom.NOT().length == 1;
+                const builtIn_atom = head_atom.builtIn_atom();
+
+                const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, true);
+                result.vars.forEach(v => conditionalVariables.add(v));
+                result.groundedVars.forEach(v => conditionalGroundedVariables.add(v));
+                result.linkedVars.forEach(linkedVar => conditionalLinkedVariables.push(linkedVar));
+            }
+        }
+
+        if(body_atoms) {
+            body_atoms.forEach(atom => {
+                if(atom.literal()) {
+                    const literal = atom.literal();
+                    const hasNot = literal.NOT().length > 0;
+                    const generalTerms = literal.classical_atom().atom().generalTerm();
+                    if(generalTerms) {
+                        generalTerms.forEach(generalTerm => {
+                            const terms = generalTerm.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    const result = this.collectVariablesFromTermOrInterval(term);
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => {
+                                            conditionalVariables.add(v)
+                                        });
+
+                                        if(!hasNot) {
+                                            result.groundableVars.forEach(v => conditionalGroundedVariables.add(v));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                } else if(atom.builtIn_atom) {
+                    const isNegated = atom.NOT().length == 1;
+                    const builtIn_atom = atom.builtIn_atom();
+
+                    const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, false);
+                    result.vars.forEach(v => conditionalVariables.add(v));
+                    result.groundedVars.forEach(v => conditionalGroundedVariables.add(v));
+                    result.linkedVars.forEach(linkedVar => conditionalLinkedVariables.push(linkedVar));
+                }
+            });
+        }
+
+        return {conditionalVariables, conditionalGroundedVariables, conditionalLinkedVariables}
+    }
+
+    collectVariablesFromBodyConditional(conditional) {
+        let conditionalVariables = new Set();
+        let conditionalGroundedVariables = new Set();
+        let conditionalLinkedVariables = [];
+
+        const head_atom = conditional.head_condition_atom();
+        const body_atoms = conditional.body_condition_atom();
+
+        // We need to keep track of variables that appear in the body of the conditional for variable safety detection
+        // This happens because conditionals that appear in the body of a rulehave a different mechanism when compared to normal rules. We leave the logic tree below:
+
+        // For each variable X in a conditional literal L0 : L1,...,Ln
+        // ├─ Is this conditional literal in the HEAD of the rule?
+        // │  │
+        // │  └─ Does X occur anywhere in the condition L1,...,Ln?
+        // │     ├─ NO  → UNSAFE (heads never supply their own domain — X must come from the condition, no exceptions here)
+        // │     │
+        // │     └─ YES → Is at least one of those occurrences POSITIVE (not under "not")?
+        // │              ├─ YES → safe
+        // │              └─ NO  → UNSAFE (negation never binds)
+        // │
+        // └─ Is this conditional literal in the BODY of the rule?
+        //    │
+        //    └─ Does X occur anywhere in the condition L1,...,Ln?
+        //       ├─ YES → Is at least one of those occurrences POSITIVE?
+        //       │        ├─ YES → safe
+        //       │        └─ NO  → UNSAFE (negation never binds)
+        //       │
+        //       └─ NO  → Is L0 itself POSITIVE (not "not L0")?
+        //                ├─ YES → safe (L0's own predicate extension becomes X's domain)
+        //                └─ NO  → UNSAFE (L0 negated, nothing left to bind X)
+
+        // In general the logic is the same, but variables in the head of the conditional behave differently depending on if the 
+        // same variable appears in the body of the conditional
+        let body_variables = new Set();
+
+        if(body_atoms) {
+            body_atoms.forEach(atom => {
+                if(atom.literal()) {
+                    const literal = atom.literal();
+                    const hasNot = literal.NOT().length > 0;
+                    const generalTerms = literal.classical_atom().atom().generalTerm();
+                    if(generalTerms) {
+                        generalTerms.forEach(generalTerm => {
+                            const terms = generalTerm.termOrInterval();
+                            if(terms) {
+                                terms.forEach(term => {
+                                    const result = this.collectVariablesFromTermOrInterval(term);
+                                    if(result.skip) {
+                                        // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                        // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                        // As a result, we will simply skip these cases and not throw any errors.
+                                    } else {
+                                        result.allVars.forEach(v => {
+                                            conditionalVariables.add(v)
+                                            body_variables.add(v)
+                                        });
+
+                                        if(!hasNot) {
+                                            result.groundableVars.forEach(v => conditionalGroundedVariables.add(v));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                } else if(atom.builtIn_atom) {
+                    const isNegated = atom.NOT().length == 1;
+                    const builtIn_atom = atom.builtIn_atom();
+
+                    const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, false);
+                    result.vars.forEach(v => conditionalVariables.add(v));
+                    result.groundedVars.forEach(v => conditionalGroundedVariables.add(v));
+                    result.linkedVars.forEach(linkedVar => conditionalLinkedVariables.push(linkedVar));
+                }
+            });
+        }
+
+        if(head_atom) {
+            if(head_atom.literal()) {
+                const literal = head_atom.literal();
+                const hasNot = literal.NOT().length > 0;
+                const generalTerms = literal.classical_atom().atom().generalTerm();
+                if(generalTerms) {
+                    generalTerms.forEach(generalTerm => {
+                        const terms = generalTerm.termOrInterval();
+                        if(terms) {
+                            terms.forEach(term => {
+                                const result = this.collectVariablesFromTermOrInterval(term);
+                                if(result.skip) {
+                                    // In clingo, when there is a arithmetic operation between two elements with different types (for example, between a variable and a tuple), a 'undefined operation'
+                                    // message is shown. This could be implemented in this parser, however it requires tracking the typing of every element that can be used in arithmetic operations.
+                                    // As a result, we will simply skip these cases and not throw any errors.
+                                } else {
+                                    result.allVars.forEach(v => {
+                                        conditionalVariables.add(v)
+                                        if(!body_variables.has(v) && !hasNot) {
+                                            conditionalGroundedVariables.add(v);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+            } else if(head_atom.builtIn_atom()) {
+                const isNegated = head_atom.NOT().length == 1;
+                const builtIn_atom = head_atom.builtIn_atom();
+
+                const result = this.collectVariablesFromBuiltInAtom(builtIn_atom, isNegated, true);
+                result.vars.forEach(v => conditionalVariables.add(v));
+                result.groundedVars.forEach(v => conditionalGroundedVariables.add(v));
+                result.linkedVars.forEach(linkedVar => conditionalLinkedVariables.push(linkedVar));
+            }
+        }
+
+        return {conditionalVariables, conditionalGroundedVariables, conditionalLinkedVariables}
     }
 
     verifyUnsafeVariables(totalVariables, groundedVariables, linkedVariables, contextVariables, groundedContextVariables, linkedContextVariables) {
@@ -3254,10 +4766,6 @@ class VerboseASPListener extends ASPListener {
         return this.usedPredicates;
     }
 
-    getStatementsByLine() {
-        return this.statementsByLine;
-    }
-
     getLineRanges() {
         return this.lineRanges;
     }
@@ -3306,11 +4814,10 @@ export function parse(input) {
         const constructTypes = listener.getConstructTypes();
         const definedPredicates = listener.getDefinedPredicates();
         const usedPredicates = listener.getUsedPredicates();
-        const statementsByLine = listener.getStatementsByLine();
         const lineRanges = listener.getLineRanges();
         const unsafeVariables = listener.getUnsafeVariables();
 
-        return {syntaxErrors: [...parserSyntaxErrors, ...listenerSyntaxErrors], tokenErrors, constructTypes, definedPredicates, usedPredicates, statementsByLine, lineRanges, unsafeVariables, 
+        return {syntaxErrors: [...parserSyntaxErrors, ...listenerSyntaxErrors], tokenErrors, constructTypes, definedPredicates, usedPredicates, lineRanges, unsafeVariables, 
             hasGenerator, hasUnclosedComment};
 
     } catch (error) {

@@ -1,5 +1,3 @@
-// Dummy comment for proof of ownership
-
 const vscode = require('vscode');
 const { loadErrors } = require('./engine/loadErrors.js');
 const { readFileSync, existsSync, writeFileSync } = require('fs');

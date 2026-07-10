@@ -41,6 +41,9 @@ not.
 % Malformed Show Statement
 #show a/..  
 
+% "not" isn't valid before a heuristic atom
+#heuristic not q(X). [1,sign]               
+
 
 
 

@@ -47,3 +47,17 @@
 :- _ != 1, _ == 2.  % Anon0 unsafe
 
 :- _ != 1, _ != 2.   % Anon0, Anon1 unsafe
+
+% Conditionals
+
+:- avail(Y) : person(Y). % SAFE
+:- not avail(Y) : person(Y). % SAFE
+:- q(X), avail(Y) : person(Y). % SAFE
+:- avail(X) : person(X), q(X). % SAFE
+:- avail(Y) : person(Y); q(X). % SAFE
+:- p(X) : q(X); r(X) : s(X). % SAFE
+:- p(X) : q(Y). % SAFE
+:- p(Y) : q(X), r(X). % SAFE
+:- not p(Y) : q(X), r(X). % UNSAFE: Y
+:- not p(Y) : q(X), not r(X). % UNSAFE: Y
+:- not p(Y) : not q(X), not r(X). % UNSAFE: X, Y
