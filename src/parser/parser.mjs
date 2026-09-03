@@ -166,6 +166,7 @@ class VerboseASPListener extends ASPListener {
         // This helps to uniquely identify anonymous variables. 
         // This is important for safety checking, as each anonymous variable is considered distinct and so (as far as I am aware) cannot be grounded
         this.anonCounter = 0;
+        this.program_statements = [];
     }
 
     enterStatement(ctx) {
@@ -788,6 +789,27 @@ class VerboseASPListener extends ASPListener {
                 indexEnd: ctx.stop.column + 1
             })
         }
+    }
+
+    enterProgram_statement(ctx) {
+        if (!ctx.start || !ctx.stop) return;
+
+        // Push a program statement that represents the start of the program if the first line is not a program statement.
+        if(this.program_statements.length == 0) 
+            if(!(ctx.start.line == 1 && ctx.start.column == 0)) 
+                this.program_statements.push({
+                    lineStart: 1,
+                    lineEnd: 1,
+                    indexStart: 0,
+                    indexEnd: 0
+                })
+        
+        this.program_statements.push({
+            lineStart: ctx.start.line,
+            lineEnd: ctx.stop.line,
+            indexStart: ctx.start.column,
+            indexEnd: ctx.stop.column
+        });
     }
 
     enterConstant(ctx) {
@@ -4748,6 +4770,23 @@ class VerboseASPListener extends ASPListener {
     }
 
     exitProgram(ctx) {
+        // If there are no program statements, we add a default one to cover the entire program.
+        if(this.program_statements.length == 0) {
+            this.program_statements.push({
+                lineStart: 1,
+                lineEnd: 1,
+                indexStart: 0,
+                indexEnd: 0
+            })
+        }
+
+        // Add a limit to the last program statement to ensure it covers the entire program.
+        this.program_statements.push({
+            lineStart: ctx.stop.line,
+            lineEnd: ctx.stop.line,
+            indexStart: ctx.stop.column + ctx.stop.text.length,
+            indexEnd: ctx.stop.column + ctx.stop.text.length
+        })
     }
 
     getSyntaxErrors() {
@@ -4780,6 +4819,10 @@ class VerboseASPListener extends ASPListener {
 
     getHasUnclosedComment() {
         return this.hasUnclosedComment;
+    }
+
+    getProgramStatements() {
+        return this.program_statements;
     }
 }
 
@@ -4816,9 +4859,10 @@ export function parse(input) {
         const usedPredicates = listener.getUsedPredicates();
         const lineRanges = listener.getLineRanges();
         const unsafeVariables = listener.getUnsafeVariables();
+        const program_statements = listener.getProgramStatements();
 
         return {syntaxErrors: [...parserSyntaxErrors, ...listenerSyntaxErrors], tokenErrors, constructTypes, definedPredicates, usedPredicates, lineRanges, unsafeVariables, 
-            hasGenerator, hasUnclosedComment};
+            hasGenerator, hasUnclosedComment, program_statements};
 
     } catch (error) {
         console.error('Unexpected error during parsing:', error);

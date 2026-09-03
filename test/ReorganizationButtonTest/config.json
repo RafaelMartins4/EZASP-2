@@ -7,7 +7,7 @@
     "disableFeatures":{
         "syntaxChecking":"false",
         "orderErrors":"false",
-        "predicateErrors":"false",
+        "predicateErrors":"true",
         "hoverPredicates":"false",
         "commentWarnings":"true",
         "unsafeVariables":"true"

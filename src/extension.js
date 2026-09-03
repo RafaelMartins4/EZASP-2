@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const { loadErrors } = require('./engine/loadErrors.js');
+const { getBlockAtPosition, isWithinBlock } = require('./engine/blockUtils.js');
 const { readFileSync, existsSync, writeFileSync } = require('fs');
 const path = require('path');
 const { dirname } = require('path');
@@ -41,6 +42,7 @@ let definedPredicates;
 let usedPredicates;
 let constructTypes;
 let hasUnclosedComment = false;
+let program_statements;
 
 function getExtraFiles(activeEditor){
 	const fileName = activeEditor.document.fileName;
@@ -99,6 +101,7 @@ async function loadThings(activeEditor, fileName, diagnosticCollection) {
 	usedPredicates = errorResults.usedPredicates;
 	constructTypes = errorResults.constructTypes
 	hasUnclosedComment = errorResults.hasUnclosedComment;
+	program_statements = errorResults.program_statements;
 
 	const syntaxErrorObjects = errorResults.syntaxErrorRanges;
 	const unsafeVariablesObjects = errorResults.unsafeVariablesErrorRanges;
@@ -312,8 +315,20 @@ async function activate(context) {
 		);
 
 		context.subscriptions.push(
-			vscode.commands.registerCommand('ezasp.fixOrderingErrors', fixOrderingHandler)
+			vscode.commands.registerCommand('ezasp.localFixOrdering', fixOrderingHandler)
 		);
+
+		context.subscriptions.push(
+			vscode.commands.registerCommand('ezasp.globalFixOrdering', globalFixOrderingHandler)
+		);
+
+		const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 0);
+		statusBar.text = '$(tools) [EZASP] Fix order globally';
+		statusBar.command = 'ezasp.globalFixOrdering';
+		statusBar.tooltip = '[EZASP] Fix order globally';
+		statusBar.show();
+		context.subscriptions.push(statusBar);
+
 
 		const diagnosticCollection = vscode.languages.createDiagnosticCollection("diagnostics");
 		context.subscriptions.push(diagnosticCollection);
@@ -372,230 +387,298 @@ async function activate(context) {
 function deactivate() { }
 
 class CodeActionProvider {
-  // @ts-ignore
-  provideCodeActions(document, range, context) {
-    const actions = [];
+	// @ts-ignore
+	provideCodeActions(document, range, context) {
+		const actions = [];
 
-    for (const diagnostic of context.diagnostics) {
-      if (diagnostic.code === 'ordering-warning') {
-        const fix = new vscode.CodeAction(
-          'Fix order',
-          vscode.CodeActionKind.QuickFix
-        );
+		for (const diagnostic of context.diagnostics) {
+			if (diagnostic.code === 'ordering-warning') {
+				const fix = new vscode.CodeAction(
+				'[EZASP] Fix order locally',
+				vscode.CodeActionKind.QuickFix
+				);
 
-        fix.command = {
-          title: 'Fix order',
-          command: 'ezasp.fixOrderingErrors',
-          arguments: [document]
-        };
+				fix.command = {
+					title: '[EZASP] Fix order locally',
+					command: 'ezasp.localFixOrdering',
+					arguments: [diagnostic.range]
+				};
 
-        fix.diagnostics = [diagnostic];
-        fix.isPreferred = true;
+				fix.diagnostics = [diagnostic];
+				fix.isPreferred = true;
 
-        actions.push(fix);
-      }
-    }
-
-    return actions;
-  }
-}
-
-function fixOrderingHandler(document) {
-	if(hasUnclosedComment) {
-		vscode.window.showErrorMessage('Detected an Unclosed Block Comment in the program. Please fix this issue before reorganizing the order of the constructs.')
-	} else {
-
-		const lines = document.getText().split(/\r?\n/);
-
-		const expandedRanges = [];
-
-		// Step 1: Extend Downwards
-		for (const construct of constructTypes) {
-			let { lineStart, lineEnd, indexStart, indexEnd, type } = construct;
-			let endLine = lineEnd - 1;
-			let endIndex = indexEnd + 1;
-
-			let i = endLine;
-			let j = endIndex;
-
-			let line = lines[i];
-			let rest = line.slice(j);
-
-			
-
-			while (true) {
-				let restTrimmed = rest.trimStart();
-				if (restTrimmed.startsWith('%*')) {
-					// Block comment
-					let blockLine = i;
-					let blockIndex = line.indexOf('%*', j) + 2;
-					let foundEnd = false;
-					while (blockLine < lines.length) {
-						let blockEndIdx = lines[blockLine].indexOf('*%', blockIndex);
-						if (blockEndIdx !== -1) {
-							i = blockLine;
-							j = blockEndIdx + 2;
-							line = lines[i];
-							rest = line.slice(j);
-							foundEnd = true;
-							break;
-						}
-						blockLine++;
-						blockIndex = 0;
-					}
-
-					// If the closing token is found AFTER the construct's line, don't search for any other comments
-					if(i > endLine)
-						break;
-			
-					if (!foundEnd) {
-						// Shouldn't happen but check anyways
-						console.error('Unclosed block comment detected.');
-						break;
-					}  
-				} else if (restTrimmed.startsWith('%') || restTrimmed === '') {
-					// Line comment or empty line
-					j = line.length;
-					rest = '';
-					break;
-				} else {
-					// There's another statement or code after the dot
-					break;
-				}
-			}
-
-			expandedRanges.push({
-				type,
-				lineStart,
-				lineEnd: i + 1,
-				indexStart,
-				indexEnd: j
-			});
-		}
-
-		// Step 2: Extend Upwards
-		const finalRanges = [];
-
-		for (let k = 0; k < expandedRanges.length; k++) {
-			const curr = expandedRanges[k];
-			const prev = expandedRanges[k - 1];
-
-			// Initial start point: either beginning of file or end of previous construct
-			let scanLine = (k === 0) ? 0 : prev.lineEnd - 1;
-			let scanIndex = (k === 0) ? 0 : prev.indexEnd;
-
-			let adjustedLine = curr.lineStart - 1;
-			let adjustedIndex = curr.indexStart;
-
-			while (scanLine < curr.lineStart - 1 || (scanLine === curr.lineStart - 1 && scanIndex < curr.indexStart)) {
-				const line = lines[scanLine];
-				const rest = line.slice(scanIndex).trim();
-
-				if (rest.startsWith('%') || rest.startsWith('%*')) {
-					// Found a comment — adjust current construct to begin here
-					adjustedLine = scanLine;
-					adjustedIndex = scanIndex;
-					break;
-				}
-
-				if (rest !== '') {
-					break;
-				}
-
-				scanLine++;
-				scanIndex = 0;
-			}
-
-			finalRanges.push({
-				type: curr.type,
-				lineStart: adjustedLine + 1,
-				lineEnd: curr.lineEnd,
-				indexStart: adjustedIndex,
-				indexEnd: curr.indexEnd
-			});
-		}
-
-		// Step 3: Reorganize constructs by type
-		const ezaspOrder = [
-			'Constant',
-			'Fact',
-			'ChoiceRule',
-			'DefiniteRule',
-			'Constraint',
-			'Optimization',
-			'Show'
-		];
-
-		const constructsByType = {};
-		for (const type of ezaspOrder) constructsByType[type] = [];
-		for (let i = 0; i < finalRanges.length; i++) {
-			const { type, lineStart, lineEnd, indexStart, indexEnd } = finalRanges[i];
-			constructsByType[type]?.push({ lineStart, lineEnd, indexStart, indexEnd });
-		}
-
-		// Step 4: Reorder constructs in critical sections (Facts, Choice Rules and Definite Rules)
-		// These sections can define and use predicates, so it is possible to minimize stratification warnings by reordering them inside their own section
-		// All other sections (Constants, Constraints, etc.) do not need to be reordered, given that their intra-section order will never 
-		// cause stratification warnings (as they never define and use predicates simultaneously)
-
-		const reorderedFacts = reorderSection(constructsByType['Fact']);
-
-		const reorderedChoiceRules = reorderSection(constructsByType['ChoiceRule']);
-
-		const reorderedDefiniteRules = reorderSection(constructsByType['DefiniteRule']);
-		
-		if(reorderedFacts.hasCycle) {
-			vscode.window.showWarningMessage('Dependency cycle detected in Facts section. As a result, stratification warnings cannot be solved automatically in this section.');
-		} 
-		
-		constructsByType['Fact'] = reorderedFacts.sorted;
-		
-		if(reorderedChoiceRules.hasCycle) {
-			vscode.window.showWarningMessage('Dependency cycle detected in Choice Rules section. As a result, stratification warnings cannot be solved automatically in this section.');
-		} 
-		
-		constructsByType['ChoiceRule'] = reorderedChoiceRules.sorted;
-
-		if(reorderedDefiniteRules.hasCycle) {
-			vscode.window.showWarningMessage('Dependency cycle detected in Definite Rules section. As a result, stratification warnings cannot be solved automatically in this section.');
-		}
-		
-		constructsByType['DefiniteRule'] = reorderedDefiniteRules.sorted;
-
-		// Step 5: Rewrite the code in the editor with the new ordering
-		let result = [];
-
-		for (const type of ezaspOrder) {
-			for (const { lineStart, lineEnd, indexStart, indexEnd } of constructsByType[type]) {
-				if (lineStart === lineEnd) {
-					// Single-line construct
-					result.push(lines[lineStart - 1].slice(indexStart, indexEnd));
-				} else {
-					// Multi-line construct
-					let constructLines = [];
-					constructLines.push(lines[lineStart - 1].slice(indexStart));
-					for (let l = lineStart; l < lineEnd - 1; l++) {
-						constructLines.push(lines[l]);
-					}
-					constructLines.push(lines[lineEnd - 1].slice(0, indexEnd));
-					result.push(constructLines.join('\n'));
-				}
+				actions.push(fix);
 			}
 		}
 
-		const finalText = result.join('\n\n');
-
-		// Apply it back to the document
-		const edit = new vscode.WorkspaceEdit();
-		const fullRange = new vscode.Range(
-			document.positionAt(0),
-			document.positionAt(document.getText().length)
-		);
-		edit.replace(document.uri, fullRange, finalText);
-
-		vscode.workspace.applyEdit(edit);
+		return actions;
 	}
 }
+
+// Computes the reorder for one block (does not apply the changes directly). 
+function computeBlockReorder(document, targetRange) {
+	
+	const targetRangePos = {
+        lineStart: targetRange.start.line + 1,
+        indexStart: targetRange.start.character
+    };
+
+    const block = getBlockAtPosition(targetRangePos, program_statements);
+    if (!block) return null;
+
+    const { blockStart, blockEnd } = block;
+    const blockConstructTypes = constructTypes.filter(c => isWithinBlock(c, blockStart, blockEnd));
+
+    const lines = document.getText().split(/\r?\n/);
+    const expandedRanges = [];
+
+	// Step 1: Extend Downwards
+	for (const construct of blockConstructTypes) {
+		let { lineStart, lineEnd, indexStart, indexEnd, type } = construct;
+		let endLine = lineEnd - 1;
+		let endIndex = indexEnd + 1;
+
+		let i = endLine;
+		let j = endIndex;
+
+		let line = lines[i];
+		let rest = line.slice(j);
+
+		while (true) {
+			let restTrimmed = rest.trimStart();
+			if (restTrimmed.startsWith('%*')) {
+				// Block comment
+				let blockLine = i;
+				let blockIndex = line.indexOf('%*', j) + 2;
+				let foundEnd = false;
+				while (blockLine < lines.length) {
+					let blockEndIdx = lines[blockLine].indexOf('*%', blockIndex);
+					if (blockEndIdx !== -1) {
+						i = blockLine;
+						j = blockEndIdx + 2;
+						line = lines[i];
+						rest = line.slice(j);
+						foundEnd = true;
+						break;
+					}
+					blockLine++;
+					blockIndex = 0;
+				}
+
+				// If the closing token is found AFTER the construct's line, don't search for any other comments
+				if(i > endLine)
+					break;
+		
+				if (!foundEnd) {
+					// Shouldn't happen but check anyways
+					console.error('Unclosed block comment detected.');
+					break;
+				}  
+			} else if (restTrimmed.startsWith('%') || restTrimmed === '') {
+				// Line comment or empty line
+				j = line.length;
+				rest = '';
+				break;
+			} else {
+				// There's another statement or code after the dot
+				break;
+			}
+		}
+
+		expandedRanges.push({
+			type,
+			lineStart,
+			lineEnd: i + 1,
+			indexStart,
+			indexEnd: j
+		});
+	}
+
+	// Step 2: Extend Upwards
+	const finalRanges = [];
+
+	for (let k = 0; k < expandedRanges.length; k++) {
+		const curr = expandedRanges[k];
+		const prev = expandedRanges[k - 1];
+
+		// Initial start point: either the start of THIS BLOCK, or the end of the previous construct
+		let scanLine = (k === 0) ? blockStart.lineEnd - 1 : prev.lineEnd - 1;
+		let scanIndex = (k === 0) ? blockStart.indexEnd + 1 : prev.indexEnd;
+
+		let adjustedLine = curr.lineStart - 1;
+		let adjustedIndex = curr.indexStart;
+
+		while (scanLine < curr.lineStart - 1 || (scanLine === curr.lineStart - 1 && scanIndex < curr.indexStart)) {
+			const line = lines[scanLine];
+			const rest = line.slice(scanIndex).trim();
+
+			if (rest.startsWith('%') || rest.startsWith('%*')) {
+				adjustedLine = scanLine;
+				adjustedIndex = scanIndex;
+				break;
+			}
+
+			if (rest !== '') {
+				break;
+			}
+
+			scanLine++;
+			scanIndex = 0;
+		}
+
+		finalRanges.push({
+			type: curr.type,
+			lineStart: adjustedLine + 1,
+			lineEnd: curr.lineEnd,
+			indexStart: adjustedIndex,
+			indexEnd: curr.indexEnd
+		});
+	}
+
+	if (finalRanges.length === 0 || expandedRanges.length === 0) return null;
+
+	// Step 3: Reorganize constructs by type
+	const ezaspOrder = [
+		'Constant',
+		'Fact',
+		'ChoiceRule',
+		'DefiniteRule',
+		'Constraint',
+		'Optimization',
+		'Show'
+	];
+
+	const constructsByType = {};
+	for (const type of ezaspOrder) constructsByType[type] = [];
+	for (let i = 0; i < finalRanges.length; i++) {
+		const { type, lineStart, lineEnd, indexStart, indexEnd } = finalRanges[i];
+		constructsByType[type]?.push({ lineStart, lineEnd, indexStart, indexEnd });
+	}
+
+	// Step 4: Reorder constructs in critical sections (Facts, Choice Rules and Definite Rules)
+	// These sections can define and use predicates, so it is possible to minimize stratification warnings by reordering them inside their own section
+	// All other sections (Constants, Constraints, etc.) do not need to be reordered, given that their intra-section order will never 
+	// cause stratification warnings (as they never define and use predicates simultaneously)
+
+	const reorderedFacts = reorderSection(constructsByType['Fact']);
+
+	const reorderedChoiceRules = reorderSection(constructsByType['ChoiceRule']);
+
+	const reorderedDefiniteRules = reorderSection(constructsByType['DefiniteRule']);
+	
+	if(reorderedFacts.hasCycle) {
+		vscode.window.showWarningMessage('Dependency cycle detected in Facts section. As a result, stratification warnings cannot be solved automatically in this section.');
+	} 
+	
+	constructsByType['Fact'] = reorderedFacts.sorted;
+	
+	if(reorderedChoiceRules.hasCycle) {
+		vscode.window.showWarningMessage('Dependency cycle detected in Choice Rules section. As a result, stratification warnings cannot be solved automatically in this section.');
+	} 
+	
+	constructsByType['ChoiceRule'] = reorderedChoiceRules.sorted;
+
+	if(reorderedDefiniteRules.hasCycle) {
+		vscode.window.showWarningMessage('Dependency cycle detected in Definite Rules section. As a result, stratification warnings cannot be solved automatically in this section.');
+	}
+	
+	constructsByType['DefiniteRule'] = reorderedDefiniteRules.sorted;
+
+	// Step 5: Rewrite the code in the editor with the new ordering
+	let result = [];
+
+	for (const type of ezaspOrder) {
+		for (const { lineStart, lineEnd, indexStart, indexEnd } of constructsByType[type]) {
+			if (lineStart === lineEnd) {
+				// Single-line construct
+				result.push(lines[lineStart - 1].slice(indexStart, indexEnd));
+			} else {
+				// Multi-line construct
+				let constructLines = [];
+				constructLines.push(lines[lineStart - 1].slice(indexStart));
+				for (let l = lineStart; l < lineEnd - 1; l++) {
+					constructLines.push(lines[l]);
+				}
+				constructLines.push(lines[lineEnd - 1].slice(0, indexEnd));
+				result.push(constructLines.join('\n'));
+			}
+		}
+	}
+	const finalText = result.join('\n\n');
+
+	const firstRange = finalRanges[0];
+	const lastRange = finalRanges[finalRanges.length - 1];
+
+    const editRange = new vscode.Range(
+        new vscode.Position(firstRange.lineStart - 1, firstRange.indexStart),
+        new vscode.Position(lastRange.lineEnd - 1, lastRange.indexEnd)
+    );
+
+    return { editRange, finalText };
+}
+
+// Local button: this will be called when the user clicks the local "Fix order" button that appears in the Quick Fix menu.
+function fixOrderingHandler(targetRange) {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		vscode.window.showErrorMessage('No active editor found.');
+		return;
+	}
+
+	const document = editor.document;
+
+	if (hasUnclosedComment) {
+        vscode.window.showErrorMessage('Detected an Unclosed Block Comment in the program. Please fix this issue before reorganizing the order of the constructs.');
+        return;
+    }
+
+	const result = computeBlockReorder(document, targetRange);
+    if (!result) {
+        vscode.window.showErrorMessage('Could not find a valid program block to reorder.');
+        return;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, result.editRange, result.finalText);
+    vscode.workspace.applyEdit(edit);
+}
+
+// Global button: this will be called when the user clicks the global "Fix order" button. 
+// All the edits are applied at once within a shared edit to ensure that the text does not get corrupted 
+function globalFixOrderingHandler() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		vscode.window.showErrorMessage('No active editor found.');
+		return;
+	}
+
+	const document = editor.document;
+
+	if (hasUnclosedComment) {
+        vscode.window.showErrorMessage('Detected an Unclosed Block Comment in the program. Please fix this issue before reorganizing the order of the constructs.');
+        return;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+
+    for (let i = 0; i < program_statements.length - 1; i++) {
+        const block = program_statements[i];
+        const blockRange = convertRange({
+            lineStart: block.lineStart - 1,
+            indexStart: block.indexStart,
+            lineEnd: program_statements[i + 1].lineStart - 1,
+            indexEnd: program_statements[i + 1].indexStart
+        });
+
+        const result = computeBlockReorder(document, blockRange);
+        if (result) {
+            edit.replace(document.uri, result.editRange, result.finalText);
+        }
+    }
+
+    vscode.workspace.applyEdit(edit);
+}
+
 
 function isRangeWithinConstruct(range, construct) {
 	const startsAfterOrAt =

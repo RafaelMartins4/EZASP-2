@@ -2,17 +2,15 @@
 
 % Fact base
 base(1).
-
 base(2).
 
-{}.
+{} :- test.
 
 % Reorganized base(3)
 base(3).
 
 % Rule chain
 p1(X) :- base(X).
-
 p2(X) :- p1(X), base(X).
-
 p3(X) :- p2(X).
+

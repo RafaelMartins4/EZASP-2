@@ -1,4 +1,5 @@
 const { loadParser } = require('../parser/parser-wrapper.cjs');
+const { isWithinBlock } = require('./blockUtils.js');
 
 const MAC_OS = 1;
 const WINDOWS = 2;
@@ -48,6 +49,7 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 	const parserResult = parser.parse(textRaw);
 	const lineRanges = parserResult.lineRanges;
 	const hasUnclosedComment = parserResult.hasUnclosedComment;
+	const program_statements = parserResult.program_statements;
 
 	const extraParserResults = [];
 	const extraDefinedPredicates = [];
@@ -118,106 +120,89 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 
 	// Ordering Errors
 
+	const constructTypes = parserResult.constructTypes;
+
 	let orderingWarningRanges = [];
 	let orderingWarningMessages = [];
-
 	let noGeneratorWarningRanges = [];
 	let noGeneratorWarningMessages = [];
 
-	const constructTypes = parserResult.constructTypes;
-
 	if (orderErrors != "true") {
+		const correctOrder = ['Constant', 'Fact', 'ChoiceRule', 'DefiniteRule', 'Constraint', 'Optimization', 'Show'];
 
-		// Check if the program has a generator (choice rule or fact with a choice)
 		let hasGenerator = parserResult.hasGenerator;
-
-		if(!hasGenerator && extraTextExists) {
+		if (!hasGenerator && extraTextExists) {
 			hasGenerator = extraHasGenerator.includes(true);
 		}
 
-		const correctOrder = [
-			'Constant',
-			'Fact',
-			'ChoiceRule',
-			'DefiniteRule',
-			'Constraint',
-			'Optimization',
-			'Show'
-		];
+		for (let i = 0; i < program_statements.length - 1; i++) {
+			const blockStart = program_statements[i];
+			const blockEnd = program_statements[i + 1];
+			const blockConstructs = constructTypes.filter(c => isWithinBlock(c, blockStart, blockEnd));
+
+			const result = checkOrderingForBlock(blockConstructs, correctOrder, hasGenerator);
+			orderingWarningRanges.push(...result.orderingWarningRanges);
+			orderingWarningMessages.push(...result.orderingWarningMessages);
+			noGeneratorWarningRanges.push(...result.noGeneratorWarningRanges);
+			noGeneratorWarningMessages.push(...result.noGeneratorWarningMessages);
+
+			hasGenerator = result.hasGenerator; // carry forward into the next block
+		}
+	}
+
+	function checkOrderingForBlock(constructs, correctOrder, hasGenerator) {
+		const orderingWarningRanges = [];
+		const orderingWarningMessages = [];
+		const noGeneratorWarningRanges = [];
+		const noGeneratorWarningMessages = [];
 
 		let lastSeenIndex = -1;
 
-		for (const construct of constructTypes) {
+		for (const construct of constructs) {
 			const currentIndex = correctOrder.indexOf(construct.type);
-	
-			if (currentIndex === -1) {
-				// If the type is not in the correctOrder array, skip it
-				continue;
-			}
+			if (currentIndex === -1) continue;
 
-			let generatorWarningMessage = "Warning: The program does not have a generator. Consider adding a Choice Rule or a Fact with a choice in its head";;
-	
+			const generatorWarningMessage = "Warning: The program does not have a generator. Consider adding a Choice Rule or a Fact with a choice in its head";
+
+			const range = {
+				lineStart: construct.lineStart - 1,
+				lineEnd: construct.lineEnd - 1,
+				indexStart: construct.indexStart,
+				indexEnd: construct.indexEnd + 1
+			};
+
 			if (currentIndex < lastSeenIndex) {
-				orderingWarningRanges.push({
-					lineStart: construct.lineStart - 1,
-					lineEnd: construct.lineEnd - 1,
-					indexStart: construct.indexStart,
-					indexEnd: construct.indexEnd + 1
-				});
+				orderingWarningRanges.push(range);
+				orderingWarningMessages.push(getOrderingMessage(construct.type));
 
-				let warningMessage;
-				switch (construct.type) {
-					case 'Constant':
-						warningMessage = 'Warning: Constants must be at the beginning of the program.';
-						break;
-					case 'Fact':
-						warningMessage = 'Warning: Facts must be at the beginning or between Constants and Choice Rules.';
-						break;
-					case 'ChoiceRule':
-						warningMessage = 'Warning: Choice Rules must be at the beginning or between Facts and Definite Rules.';
-						break;
-					case 'DefiniteRule':
-						warningMessage = 'Warning: Definite Rules must be between Choice Rules and Constraints.';
-						break;
-					case 'Constraint':
-						warningMessage = 'Warning: Constraints must be at the end of the program or between Definite Rules and either Weak Constraints, Optimization Statements or Show Statements.';
-						break;
-					case 'Optimization':
-						warningMessage = 'Warning: Optimization Statements and Weak Constraints must appear after Constraints and before Show Statements.';
-						break;
-					case 'Show':
-						warningMessage = 'Warning: Show Statements must appear at the end of the program.';
-						break;
-					default:
-						warningMessage = `Warning: "${construct.type}" is out of order.`;
-				}
-
-				if(!hasGenerator && currentIndex > 2) {
-					orderingWarningMessages.push(warningMessage);
+				if (!hasGenerator && currentIndex > 2) {
 					noGeneratorWarningMessages.push(generatorWarningMessage);
-					noGeneratorWarningRanges.push({
-						lineStart: construct.lineStart - 1,
-						lineEnd: construct.lineEnd - 1,
-						indexStart: construct.indexStart,
-						indexEnd: construct.indexEnd + 1
-					});
-					hasGenerator = true; // Set true to avoid pushing the message again
-				} else {
-					orderingWarningMessages.push(warningMessage);
+					noGeneratorWarningRanges.push(range);
+					hasGenerator = true;
 				}
 			} else {
-				if(!hasGenerator && currentIndex > 2) {
-					noGeneratorWarningRanges.push({
-						lineStart: construct.lineStart - 1,
-						lineEnd: construct.lineEnd - 1,
-						indexStart: construct.indexStart,
-						indexEnd: construct.indexEnd + 1
-					});
+				if (!hasGenerator && currentIndex > 2) {
+					noGeneratorWarningRanges.push(range);
 					noGeneratorWarningMessages.push(generatorWarningMessage);
-					hasGenerator = true; // Set true to avoid pushing the message again
+					hasGenerator = true;
 				}
 				lastSeenIndex = currentIndex;
 			}
+		}
+
+		return { orderingWarningRanges, orderingWarningMessages, noGeneratorWarningRanges, noGeneratorWarningMessages, hasGenerator };
+	}
+
+	function getOrderingMessage(type) {
+		switch (type) {
+			case 'Constant': return 'Warning: Constants must be at the beginning of the program.';
+			case 'Fact': return 'Warning: Facts must be at the beginning or between Constants and Choice Rules.';
+			case 'ChoiceRule': return 'Warning: Choice Rules must be at the beginning or between Facts and Definite Rules.';
+			case 'DefiniteRule': return 'Warning: Definite Rules must be between Choice Rules and Constraints.';
+			case 'Constraint': return 'Warning: Constraints must be at the end of the program or between Definite Rules and either Weak Constraints, Optimization Statements or Show Statements.';
+			case 'Optimization': return 'Warning: Optimization Statements and Weak Constraints must appear after Constraints and before Show Statements.';
+			case 'Show': return 'Warning: Show Statements must appear at the end of the program.';
+			default: return `Warning: "${type}" is out of order.`;
 		}
 	}
 
@@ -230,73 +215,106 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 		1. Predicates that are used but never defined - Error, this is underlined in red
 		2. Predicates that are used before they are defined - Warning, this is underlined in yellow
 	*/
+
 	let stratificationErrorRanges = [];
 	let stratificationErrorMessages = [];
-
 	let stratificationWarningRanges = [];
 	let stratificationWarningMessages = [];
 
-	for (const [usedPredicateKey, usedPositions] of usedPredicates.entries()) {
-		let isDefinedInExtraFile = false;
+	for (let i = 0; i < program_statements.length - 1; i++) {
+		const blockStart = program_statements[i];
+		const blockEnd = program_statements[i + 1];
 
-		// Checks if another file defines the predicate
-		if(extraTextExists) {
-			for(const extraDefinedPredicatesMap of extraDefinedPredicates) {
-				if(extraDefinedPredicatesMap.has(usedPredicateKey)) {
-					// If the predicate is defined in another file, we don't need to check the rest of the extra files
-					isDefinedInExtraFile = true;
-					break;
+		const result = checkStratificationForBlock(
+			usedPredicates,
+			definedPredicates,
+			extraDefinedPredicates,
+			extraTextExists,
+			blockStart,
+			blockEnd,
+			predicateErrors
+		);
+
+		stratificationErrorRanges.push(...result.blockStratificationErrorRanges);
+		stratificationErrorMessages.push(...result.blockStratificationErrorMessages);
+		stratificationWarningRanges.push(...result.blockStratificationWarningRanges);
+		stratificationWarningMessages.push(...result.blockStratificationWarningMessages);
+	}
+
+	function checkStratificationForBlock(usedPredicates, definedPredicates, extraDefinedPredicates, extraTextExists, blockStart, blockEnd, predicateErrors) {
+		const blockStratificationErrorRanges = [];
+		const blockStratificationErrorMessages = [];
+		const blockStratificationWarningRanges = [];
+		const blockStratificationWarningMessages = [];
+
+		for (const [usedPredicateKey, usedPositions] of usedPredicates.entries()) {
+			const blockUsedPositions = usedPositions.filter(pos => isWithinBlock(pos, blockStart, blockEnd));
+			if (blockUsedPositions.length === 0) continue; // not used in this block at all
+
+			let isDefinedInExtraFile = false;
+			// Checks if another file defines the predicate
+			if(extraTextExists) {
+				for(const extraDefinedPredicatesMap of extraDefinedPredicates) {
+					if(extraDefinedPredicatesMap.has(usedPredicateKey)) {
+						// If the predicate is defined in another file, we don't need to check the rest of the extra files
+						isDefinedInExtraFile = true;
+						break;
+					}
 				}
 			}
-		}
-		// If the predicate is defined in another file, we don't need to check the current file
-		if(isDefinedInExtraFile)
-			continue;
-		
-		const definedLocations = definedPredicates.get(usedPredicateKey);
-	
-		if (!definedLocations) {
-			usedPositions.forEach(position => {
-				if (predicateErrors != "true") {
-					const range = {
-						lineStart: position.lineStart - 1,
-						lineEnd: position.lineEnd - 1,
-						indexStart: position.indexStart,
-						indexEnd: position.indexEnd + 1
-					}
+			// If the predicate is defined in another file, we don't need to check the current file
+			if(isDefinedInExtraFile)
+				continue;
 
-					if(!containsSyntaxErrorInLocation(range) && !containsUnsafeVariableErrorInLocation(range)) {
-						stratificationErrorRanges.push(range);
-						stratificationErrorMessages.push(`Error: Predicate ${usedPredicateKey} is never defined.`);
+			const allDefinedLocations = definedPredicates.get(usedPredicateKey);
+			const blockDefinedLocations = allDefinedLocations ? allDefinedLocations.filter(loc => isWithinBlock(loc, blockStart, blockEnd)) : [];
+
+			if (blockDefinedLocations.length === 0) {
+				// If the predicate is not defined in this block or in an extra file, produce a stratification error
+				blockUsedPositions.forEach(position => {
+					if (predicateErrors != "true") {
+						const range = {
+							lineStart: position.lineStart - 1,
+							lineEnd: position.lineEnd - 1,
+							indexStart: position.indexStart,
+							indexEnd: position.indexEnd + 1
+						};
+
+						if (!containsSyntaxErrorInLocation(range) && !containsUnsafeVariableErrorInLocation(range)) {
+							blockStratificationErrorRanges.push(range);
+							blockStratificationErrorMessages.push(`Error: Predicate ${usedPredicateKey} is never defined.`);
+						}
 					}
-				}
-			});
-		} else {
-			// Check if the predicate is defined before each usage
-			usedPositions.forEach(usedPosition => {
-				let isDefinedBefore = definedLocations.some(definedLocation => {
-					return (
-						definedLocation.lineStart < usedPosition.lineStart ||
-						(definedLocation.lineStart === usedPosition.lineStart &&
-							definedLocation.indexStart <= usedPosition.indexStart)
-					);
 				});
+			} else {
+				// If the predicate is used before being defined in this block, produce a stratification warning
+				blockUsedPositions.forEach(usedPosition => {
+					const isDefinedBefore = blockDefinedLocations.some(definedLocation => {
+						return (
+							definedLocation.lineStart < usedPosition.lineStart ||
+							(definedLocation.lineStart === usedPosition.lineStart &&
+								definedLocation.indexStart <= usedPosition.indexStart)
+						);
+					});
 
-				if (!isDefinedBefore && predicateErrors != "true") {
-					const range = {
-						lineStart: usedPosition.lineStart - 1,
-						lineEnd: usedPosition.lineEnd - 1,
-						indexStart: usedPosition.indexStart,
-						indexEnd: usedPosition.indexEnd + 1
-					};
+					if (!isDefinedBefore && predicateErrors != "true") {
+						const range = {
+							lineStart: usedPosition.lineStart - 1,
+							lineEnd: usedPosition.lineEnd - 1,
+							indexStart: usedPosition.indexStart,
+							indexEnd: usedPosition.indexEnd + 1
+						};
 
-					if(!containsSyntaxErrorInLocation(range) && !containsUnsafeVariableErrorInLocation(range) && !containsStratificationErrorInLocation(range)) {
-						stratificationWarningRanges.push(range);
-						stratificationWarningMessages.push(`Warning: Predicate ${usedPredicateKey} is used before it is defined.`);
+						if (!containsSyntaxErrorInLocation(range) && !containsUnsafeVariableErrorInLocation(range) && !containsStratificationErrorInLocation(range, blockStratificationErrorRanges)) {
+							blockStratificationWarningRanges.push(range);
+							blockStratificationWarningMessages.push(`Warning: Predicate ${usedPredicateKey} is used before it is defined.`);
+						}
 					}
-				}	
-			});
-		}		
+				});
+			}
+		}
+
+		return { blockStratificationErrorRanges, blockStratificationErrorMessages, blockStratificationWarningRanges, blockStratificationWarningMessages };
 	}
 
 	let symbol;
@@ -577,7 +595,7 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 		return false;
 	}
 
-	function containsStratificationErrorInLocation(location) {
+	function containsStratificationErrorInLocation(location, errorRanges = stratificationErrorRanges) {
 		// We utilize an extended location to ensure that only ranges that have atleast one character between them are considered as non-overlapping
 		// This way we eliminate cases where two issues connect their underlines, making it look like a single issue
 		const extendedLocation = {
@@ -588,7 +606,7 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 		}
 
 		if (predicateErrors != "true") {
-			if (stratificationErrorRanges.some(range => {
+			if (errorRanges.some(range => {
 				if (doRangesOverlap(range, extendedLocation)) {
 					return true;
 				}
@@ -821,7 +839,8 @@ async function loadErrors(textRaw, fileName, extraTextRaw, disableFeatures) {
 		definedPredicates: definedPredicates, 
 		usedPredicates: usedPredicates, 
 		constructTypes: constructTypes,
-		hasUnclosedComment: hasUnclosedComment
+		hasUnclosedComment: hasUnclosedComment,
+		program_statements: program_statements,
 	};
 
 	
