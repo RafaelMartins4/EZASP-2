@@ -75,4 +75,4 @@ You can post your issues/suggestions on the [GitHub Page](https://github.com/Raf
 ## Credits
 
 This extension is based on the original work by [@Ramiro Henriques](https://marketplace.visualstudio.com/publishers/RamiroHenriques),
-who created the first version of this extension ([GitHub Page](https://github.com/rmr-henriques/ezasp/issues)).
+who created the first version of this extension ([GitHub Page](https://github.com/rmr-henriques/ezasp)).

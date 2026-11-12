@@ -2,6 +2,12 @@
 
 All notable changes to the "EZASP 2" extension will be documented in this file.
 
+## 1.0.8
+
+Added #include statement support;
+Variables and constants now accept ' in their name;
+Fixed a bug that caused the extension to crash when using arithmetic operations with parenthesis. 
+
 ## 1.0.7
 
 Separated reorganization button into two: local and global reorganization. Local reorganization is achieved through the Quick-Fix menu and it will reorganize the program block where the warning appears; Global reorganization is achieved through the VS Code interface and it will reorganize every program block present in the program (guaranteeing that no construct is placed in the wrong block).
